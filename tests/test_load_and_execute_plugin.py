@@ -135,7 +135,8 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
         server_backend : MotionController2D = loader.create_instance("test_lib::ComponentPluginPy")
 
-        server_info = AdapterServerParams(host=host, port=port, backend=server_backend)
+        server_info = AdapterServerParams(host=host, port=port, \
+                backend=server_backend, plugin_name=plugin_info["PluginName"])
         server = PluginAdapter.create_server(library_manager=self.library_manager,
                 plugin_info=plugin_info, server_info=server_info)
 
