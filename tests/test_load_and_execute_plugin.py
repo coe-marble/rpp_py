@@ -7,7 +7,7 @@ import capnp
 from mpl_toolkits.axes_grid1 import host_axes
 from rpp_orchestrator.workspace import Workspace
 
-import rpp_plugin_registrator.registry_paths as rp
+import rpp_plugin_registrator.registry_config as rp
 from rpp_plugin_registrator.library_manager import LibraryManager
 from rpp_py.rpp_server_host import RppServerHost
 
@@ -51,12 +51,15 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         cls.source_ros_workspace()
 
         os.environ["RPP_WHITELIST_PLUGIN_TYPES"] = \
-            "rpp_common::MotionController2D;rpp_common::DisturbanceGenerator2D"
-        cls.rpp_handle = setup_tmp_rpp_with_test_plugins()
+            "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D"
+        whitelist = [
+            "example_plugin_simple_cpp.cpp", "example_plugin_simple_py.py"
+        ]
+        cls.rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=whitelist)
         cls.library_manager = cls.rpp_handle.library_manager
         cls.ws = Workspace(cls.rpp_handle.home / "workspace", cls.library_manager)
         cls.component_record = \
-            cls.ws.create_component("ComponentPluginInstance", "test_lib::ComponentPlugin")
+            cls.ws.create_component("ComponentPluginInstance", "test_lib::ComponentPluginSimpleCpp")
         cls.test_lib = cls.rpp_handle.test_lib
 
 
@@ -79,19 +82,19 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         plugins = self.library_manager.get_library_plugins(self.test_lib, source_language="python")
         self.assertTrue(len(plugins) > 0, "No plugins found in the test library.")
 
-        test_plugin = plugins.get("test_lib::ComponentPluginPy")
+        test_plugin = plugins.get("test_lib::ComponentPluginSimplePy")
         self.assertIsNotNone(test_plugin, "Test plugin not found.")
 
         # Load the plugin
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
 
-        from rpp_plugin_types.rpp_common import MotionController2D
-        instance : MotionController2D = loader.create_instance("test_lib::ComponentPluginPy")
+        from rpp_plugin_types.rpp_testing import MotionController2D
+        instance : MotionController2D = loader.create_instance("test_lib::ComponentPluginSimplePy")
 
-        msg = MotionController2D.Pose2D()
-        msg.position.x = 1.0
-        msg.position.y = 2.0
-        msg.yaw = 0.5
+        msg = MotionController2D.Odometry2D()
+        msg.pose.position.x = 1.0
+        msg.pose.position.y = 2.0
+        msg.pose.yaw = 0.5
 
         # except when setting non existig field
         with self.assertRaises(Exception) as context:
@@ -103,7 +106,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         result = instance.validate(msg)
 
         self.assertFalse(result, "Expected the validation to fail for the test plugin.")
-        msg.position.x = 6.0
+        msg.pose.position.x = 6.0
         result = instance.validate(msg)
         self.assertTrue(result, "Expected the validation to pass for the test plugin.")
 
@@ -117,14 +120,14 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
                 self.test_lib, source_language="python")
         self.assertTrue(len(plugins) > 0, "No plugins found in the test library.")
 
-        plugin_info = plugins.get("test_lib::ComponentPluginPy")
+        plugin_info = self.library_manager.get_plugin_info_from_lib("test_lib::ComponentPluginSimplePy")
         self.assertIsNotNone(plugin_info, "Test plugin not found.")
 
         host = "localhost"
         port = self.get_free_port()
         client_info = AdapterClientParams(host=host, port=port)
 
-        from rpp_plugin_types.rpp_common import MotionController2D
+        from rpp_plugin_types.rpp_testing import MotionController2D
 
         # Load the plugin
         client : MotionController2D = PluginAdapter.create_client(
@@ -133,7 +136,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
                 client_info=client_info)
 
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
-        server_backend : MotionController2D = loader.create_instance("test_lib::ComponentPluginPy")
+        server_backend : MotionController2D = loader.create_instance("test_lib::ComponentPluginSimplePy")
 
         server_info = AdapterServerParams(host=host, port=port, \
                 backend=server_backend, plugin_name=plugin_info["PluginName"])
@@ -147,19 +150,19 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
             await server.start_adapter_server__(runtime=runtime)
             await client.connect_adapter_client__(runtime=runtime)
 
-            msg = MotionController2D.Pose2D()
-            msg.position.x = 1.0
-            msg.position.y = 2.0
-            msg.yaw = 0.5
+            msg = MotionController2D.Odometry2D()
+            msg.pose.position.x = 1.0
+            msg.pose.position.y = 2.0
+            msg.pose.yaw = 0.5
 
-            as_dict = msg.as_dict()
-            self.assertEqual(as_dict, {'position': {'x': 1.0, 'y': 2.0}, 'yaw': 0.5},
+            as_dict = msg.pose.as_dict()
+            self.assertEqual(as_dict, { 'position': {'x': 1.0, 'y': 2.0}, 'yaw': 0.5 },
                     "as_dict() method did not return the expected dictionary representation.")
 
             is_valid = await client.validate(msg)
             self.assertFalse(is_valid.ok, "Expected the validation to fail for the test plugin.")
 
-            msg.position.x = 6.0
+            msg.pose.position.x = 6.0
             is_valid = await client.validate(msg)
             self.assertTrue(is_valid.ok, "Expected the validation to pass for the test plugin.")
             await runtime.stop()
@@ -178,9 +181,9 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
 
         plugins = self.library_manager.get_library_plugins(
                 self.test_lib, source_language="python")
-        plugin_info = plugins.get("test_lib::ComponentPluginPy")
+        plugin_info = self.library_manager.get_plugin_info_from_lib("test_lib::ComponentPluginSimplePy")
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
-        server_backend = loader.create_instance("test_lib::ComponentPluginPy")
+        server_backend = loader.create_instance("test_lib::ComponentPluginSimplePy")
         server_info = AdapterServerParams(host=host, port=plugin_port,
                 plugin_name=plugin_info["PluginName"], backend=server_backend)
         async def test_runtime():
@@ -218,7 +221,8 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
                 self.test_lib, source_language="cpp")
         self.assertTrue(len(plugins) > 0, "No plugins found in the test library.")
 
-        plugin_info = plugins.get("test_lib::ComponentPlugin")
+        plugin_info = self.library_manager \
+            .get_plugin_info_from_lib("test_lib::ComponentPluginSimpleCpp")
         self.assertIsNotNone(plugin_info, "Test plugin not found.")
 
         host = "localhost"
@@ -226,7 +230,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         runtime_port = self.get_free_port()
         client_info = AdapterClientParams(host=host, port=port)
 
-        from rpp_plugin_types.rpp_common import MotionController2D
+        from rpp_plugin_types.rpp_testing import MotionController2D
 
         # Load the plugin
         client : MotionController2D = PluginAdapter.create_client(
@@ -234,10 +238,11 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
                 plugin_info=plugin_info,
                 client_info=client_info)
 
-        loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
+        loader = PythonPluginLoader(
+                library_manager=self.library_manager, available_plugins=plugins)
         component = self.component_record
         command = ["rpp_component_server_cpp", "--host", host, "--plugin-port", str(port), \
-             "--plugin", "test_lib::ComponentPlugin", '--home', str(self.rpp_handle.home), \
+             "--plugin", "test_lib::ComponentPluginSimpleCpp", '--home', str(self.rpp_handle.home), \
              "--component-path", str(component.folder), "--runtime-port", str(runtime_port)]
         server_p = subprocess.Popen(
             command,
@@ -262,19 +267,19 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
             runtime_client = PluginRuntimeClient(host=host, port=runtime_port)
             await runtime_client.connect(runtime=runtime)
 
-            msg = MotionController2D.Pose2D()
-            msg.position.x = 1.0
-            msg.position.y = 2.0
-            msg.yaw = 0.5
+            msg = MotionController2D.Odometry2D()
+            msg.pose.position.x = 1.0
+            msg.pose.position.y = 2.0
+            msg.pose.yaw = 0.5
 
-            as_dict = msg.as_dict()
+            as_dict = msg.pose.as_dict()
             self.assertEqual(as_dict, {'position': {'x': 1.0, 'y': 2.0}, 'yaw': 0.5},
                     "as_dict() method did not return the expected dictionary representation.")
 
             is_valid = await client.validate(msg)
             self.assertFalse(is_valid.ok, "Expected the validation to fail for the test plugin.")
 
-            msg.position.x = 6.0
+            msg.pose.position.x = 6.0
             is_valid = await client.validate(msg)
             self.assertTrue(is_valid.ok, "Expected the validation to pass for the test plugin.")
 

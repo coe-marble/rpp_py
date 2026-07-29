@@ -3,7 +3,7 @@
 from typing import Dict
 
 from rpp_plugin_registrator.library_manager import LibraryManager
-from rpp_plugin_registrator.registry_paths import get_app_interfaces_path
+from rpp_plugin_registrator.registry_config import get_app_interfaces_path
 from rpp_py.adapter_info import AdapterServerParams, AdapterClientParams
 import capnp
 

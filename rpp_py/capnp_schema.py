@@ -1,6 +1,6 @@
 import capnp
 
-from rpp_plugin_registrator.registry_paths import get_app_registry_path
+from rpp_plugin_registrator.registry_config import get_app_registry_path
 from rpp_plugin_registrator.plugin_descriptors.capnp import load_capnp_schema_from_file
 
 _PLUGIN_CAPNP_REGISTRY = {}
