@@ -1,9 +1,9 @@
-
-import asyncio
 from pathlib import Path
 from rpp_py.capnp_runtime import CapnpRuntime
 import rpp_common
 import capnp
+
+from rpp_py.client_context import ClientContext
 
 
 class RuntimeConstants:
@@ -24,15 +24,15 @@ class RuntimeConstants:
 
 class PluginRuntimeServer:
 
-    def __init__(self, host="localhost", port=0, adapters = None):
-        self.host = host
-        self.port = port
+    def __init__(self, adapters = None):
         self._rpc_server = None
         self._runtime = None
         self._runtime_server = None
         self._asyncio_server = None
         self.is_running = False
-        self.adapters = adapters if adapters is not None else []
+        self.adapters = {}
+        for adapter in adapters or []:
+            self.adapters[adapter.get_info_adapter_server__().connection_name] = adapter
         self._server_class = None
         self._on_shutdown_callback = None
 
@@ -47,13 +47,13 @@ class PluginRuntimeServer:
         self._rpc_server = capnp.TwoPartyServer(stream, bootstrap=self._runtime_server)
         await self._rpc_server.on_disconnect()
 
-    async def start(self, runtime: CapnpRuntime):
-        if self.port == 0:
+    async def start(self, runtime: CapnpRuntime, host="localhost", port=0):
+        if port == 0:
             raise ValueError("Port must be specified and non-zero.")
         self._runtime = runtime
 
         self._asyncio_server = await capnp.AsyncIoStream.create_server( \
-                self._handle_connection, self.host, self.port)
+                self._handle_connection, host, port)
         self.is_running = True
 
 
@@ -73,8 +73,6 @@ class PluginRuntimeServer:
         obj.adapters = self.adapters
         return obj
 
-
-
     def _create_server_class(self):
         interface = RuntimeConstants.get_capnp_schema().PluginRuntime
         msg_type = RuntimeConstants.get_capnp_schema().AdapterInfo
@@ -86,7 +84,7 @@ class PluginRuntimeServer:
 
             msg = _context.results
             adapters_list = msg.init("adapters", len(self.adapters))
-            for i, adapter in enumerate(self.adapters):
+            for i, adapter in enumerate(self.adapters.values()):
                 info = adapter.get_info_adapter_server__()
                 adapter_info = adapters_list[i]
                 adapter_info.name = info.name
@@ -98,10 +96,18 @@ class PluginRuntimeServer:
             if self.on_shutdown_callback:
                 self.on_shutdown_callback()
 
+
+        async def getComponentCapability(self, _context, **kwargs):
+            component_name = kwargs.get("name")
+            if component_name in self.adapters:
+                adapter = self.adapters[component_name]
+                _context.results.pluginRef = adapter
+
         methods = {
                 "ping": ping,
                 "shutdown": shutdown,
-                "listAdapters": listAdapters
+                "listAdapters": listAdapters,
+                "getComponentCapability": getComponentCapability
             }
 
         return type(
@@ -112,29 +118,20 @@ class PluginRuntimeServer:
 
 
 class PluginRuntimeClient:
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
+    def __init__(self):
         self._runtime = None
+        self._context = None
         self._client = None
-        self._rpc_client = None
-        self._stream = None
 
-    async def connect(self, runtime: CapnpRuntime):
-        self._runtime = runtime
-        self._stream = await capnp.AsyncIoStream.create_connection(self.host, self.port)
-        self._rpc_client = capnp.TwoPartyClient(self._stream)
+    async def connect(self, context: ClientContext):
+        self._context = context
+        self._runtime = context.runtime
         client_class = RuntimeConstants.get_capnp_schema().PluginRuntime
-        self._client = self._rpc_client.bootstrap().cast_as(client_class)
+        self._client = self._context.get_client().cast_as(client_class)
 
     async def disconnect(self):
-        if self._rpc_client:
-            self._rpc_client.close()
-        if self._stream:
-            self._stream.close()
         self._client = None
-        self._rpc_client = None
-        self._stream = None
+        self._context = None
         self._runtime = None
 
 
@@ -147,3 +144,7 @@ class PluginRuntimeClient:
 
     async def shutdown(self):
         return await self._client.shutdown()
+
+    async def getComponentCapability(self, component_name: str):
+        response = await self._client.getComponentCapability(name=component_name)
+        return response.pluginRef

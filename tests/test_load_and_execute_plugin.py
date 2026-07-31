@@ -4,17 +4,15 @@ from pathlib import Path
 import unittest
 import sys
 import capnp
-from mpl_toolkits.axes_grid1 import host_axes
 from rpp_orchestrator.workspace import Workspace
 
 import rpp_plugin_registrator.registry_config as rp
-from rpp_plugin_registrator.library_manager import LibraryManager
-from rpp_py.rpp_server_host import RppServerHost
 
 sys.path.append(str(Path(__file__).parent.parent.parent / "rpp_py"))
 
 
 
+from rpp_py.client_context import ClientContext
 from rpp_py.plugin_runtime import PluginRuntimeClient, PluginRuntimeServer
 from rpp_py.python_plugin_loader import (
     PluginAdapter, PythonPluginLoader
@@ -125,7 +123,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
 
         host = "localhost"
         port = self.get_free_port()
-        client_info = AdapterClientParams(host=host, port=port)
+        client_info = AdapterClientParams("test_name", "test_connection_name")
 
         from rpp_plugin_types.rpp_testing import MotionController2D
 
@@ -138,17 +136,21 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
         server_backend : MotionController2D = loader.create_instance("test_lib::ComponentPluginSimplePy")
 
-        server_info = AdapterServerParams(host=host, port=port, \
-                backend=server_backend, plugin_name=plugin_info["PluginName"])
+        server_info = AdapterServerParams(
+            backend=server_backend, plugin_name=plugin_info["PluginName"])
         server = PluginAdapter.create_server(library_manager=self.library_manager,
                 plugin_info=plugin_info, server_info=server_info)
 
 
-        runtime = CapnpRuntime()
+        context = ClientContext(host=host, port=port)
         async def test_scenario():
-            await runtime.start()
-            await server.start_adapter_server__(runtime=runtime)
-            await client.connect_adapter_client__(runtime=runtime)
+            # this is needed to start the runtime before starting the server
+            # usually they wont be in the same process, but for testing we do it this way
+            await context.get_runtime().start()
+            await server.start_adapter_server__(
+                runtime=context.get_runtime(), host=host, port=port)
+            await context.start()
+            await client.connect_adapter_client__(context=context)
 
             msg = MotionController2D.Odometry2D()
             msg.pose.position.x = 1.0
@@ -165,7 +167,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
             msg.pose.position.x = 6.0
             is_valid = await client.validate(msg)
             self.assertTrue(is_valid.ok, "Expected the validation to pass for the test plugin.")
-            await runtime.stop()
+            await context.stop()
             return is_valid.ok
 
         is_valid = asyncio.run(test_scenario())
@@ -176,28 +178,50 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
     def test_plugin_runtime(self):
 
         host = "localhost"
-        runtime_port = self.get_free_port()
-        plugin_port = self.get_free_port()
+        port = self.get_free_port()
 
         plugins = self.library_manager.get_library_plugins(
                 self.test_lib, source_language="python")
         plugin_info = self.library_manager.get_plugin_info_from_lib("test_lib::ComponentPluginSimplePy")
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
         server_backend = loader.create_instance("test_lib::ComponentPluginSimplePy")
-        server_info = AdapterServerParams(host=host, port=plugin_port,
-                plugin_name=plugin_info["PluginName"], backend=server_backend)
+        server_info = AdapterServerParams(
+            plugin_name=plugin_info["PluginName"], backend=server_backend,
+            name="test_server", connection_name="test_connection")
         async def test_runtime():
             runtime = CapnpRuntime()
             await runtime.start()
+            client_context = ClientContext(host=host, port=port, runtime=runtime)
 
             server = PluginAdapter.create_server(library_manager=self.library_manager,
                     plugin_info=plugin_info, server_info=server_info)
 
-            plugin_runtime_server = PluginRuntimeServer(host=host, port=runtime_port, adapters=[server])
-            plugin_runtime_client = PluginRuntimeClient(host=host, port=runtime_port)
+            plugin_runtime_server = PluginRuntimeServer(adapters=[server])
+            plugin_runtime_client = PluginRuntimeClient()
+            await plugin_runtime_server.start(runtime=runtime, host=host, port=port)
 
-            await plugin_runtime_server.start(runtime=runtime)
-            await plugin_runtime_client.connect(runtime=runtime)
+            await client_context.start()
+            await plugin_runtime_client.connect(context=client_context)
+
+            plugin_client = PluginAdapter.create_client(library_manager=self.library_manager,
+                    plugin_info=plugin_info,
+                    client_info=AdapterClientParams(
+                        plugin_name=plugin_info["PluginName"],
+                        name="test_client",
+                        connection_name="test_connection"
+                    )
+            )
+            await plugin_client.connect_adapter_client__(context=client_context)
+
+
+            plugin_msg = plugin_client.Odometry2D()
+            plugin_msg.pose.position.x = 1.0
+            plugin_msg.pose.position.y = 2.0
+            plugin_msg.pose.yaw = 0.5
+
+            plugin_client_result = await plugin_client.validate(plugin_msg)
+            self.assertFalse(plugin_client_result.ok,
+                "Expected the validation to fail for the test plugin.")
 
 
             # Test ping
@@ -227,8 +251,11 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
 
         host = "localhost"
         port = self.get_free_port()
-        runtime_port = self.get_free_port()
-        client_info = AdapterClientParams(host=host, port=port)
+        client_info = AdapterClientParams(
+            plugin_name=plugin_info["PluginName"],
+            name="test_client",
+            connection_name="test_connection"
+        )
 
         from rpp_plugin_types.rpp_testing import MotionController2D
 
@@ -241,31 +268,26 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         loader = PythonPluginLoader(
                 library_manager=self.library_manager, available_plugins=plugins)
         component = self.component_record
-        command = ["rpp_component_server_cpp", "--host", host, "--plugin-port", str(port), \
+        command = ["rpp_component_server_cpp", "--host", host, "--port", str(port), \
              "--plugin", "test_lib::ComponentPluginSimpleCpp", '--home', str(self.rpp_handle.home), \
-             "--component-path", str(component.folder), "--runtime-port", str(runtime_port)]
+             "--path", str(component.folder),
+             "--conn", "test_connection"]
         server_p = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
 
-        runtime = CapnpRuntime()
         async def test_scenario():
-            await runtime.start()
-            num_retries = 5
-            while num_retries > 0:
-                try:
-                    await client.connect_adapter_client__(runtime=runtime)
-                    break
-                except Exception:
-                    await asyncio.sleep(1)  # Wait before retrying
-                    num_retries -= 1
-            if num_retries == 0:
-                self.fail("Client failed to connect to the server after multiple attempts.")
+            context = ClientContext(host=host, port=port)
+            succ = await context.start(1000)
+            if not succ:
+                raise RuntimeError("Failed to start client context within timeout.")
 
-            runtime_client = PluginRuntimeClient(host=host, port=runtime_port)
-            await runtime_client.connect(runtime=runtime)
+            await client.connect_adapter_client__(context=context)
+
+            runtime_client = PluginRuntimeClient()
+            await runtime_client.connect(context=context)
 
             msg = MotionController2D.Odometry2D()
             msg.pose.position.x = 1.0
@@ -285,7 +307,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
 
             await runtime_client.shutdown()
             await runtime_client.disconnect()
-            await runtime.stop()
+            await context.stop()
             return is_valid.ok
 
         is_valid = asyncio.run(test_scenario())

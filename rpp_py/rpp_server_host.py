@@ -5,9 +5,9 @@ from rpp_py.plugin_runtime import PluginRuntimeServer
 
 
 class RppServerHost:
-    def __init__(self, host: str, runtime_port: int, runtime: CapnpRuntime = None):
+    def __init__(self, host: str, port: int, runtime: CapnpRuntime = None):
         self._host = host
-        self._runtime_port = runtime_port
+        self._port = port
         self.adapters = []
         self._shutdown_promise = None
         self._runtime = runtime
@@ -30,17 +30,16 @@ class RppServerHost:
         await self._runtime.start()
         self._shutdown_promise = asyncio.get_running_loop().create_future()
 
-        print(f"Starting RPP Server Host on {self._host}:{self._runtime_port} with {len(self.adapters)} adapters...")
+        print(f"Starting RPP Server Host on {self._host}:{self._port} with {len(self.adapters)} adapters...")
 
         plugin_runtime_server = PluginRuntimeServer(
-            host=self._host, port=self._runtime_port, adapters=self.adapters
+            adapters=self.adapters
         )
         plugin_runtime_server.set_on_shutdown_callback(
             self.on_shutdown_callback_for_server)
-        await plugin_runtime_server.start(runtime=self._runtime)
+        await plugin_runtime_server.start(runtime=self._runtime,
+                host=self._host, port=self._port)
 
-        for adapter in self.adapters:
-            await adapter.start_adapter_server__(runtime=self._runtime)
         await self._shutdown_promise
 
         print("RPP Server Host stopped.")

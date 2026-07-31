@@ -10,27 +10,43 @@ from rpp_py.rpp_server_host import RppServerHost
 
 def main():
 
-    argument_parser = argparse.ArgumentParser(description="RPP Component Server for Python plugins")
-    argument_parser.add_argument("--host", help="Host address for the server")
-    argument_parser.add_argument("--runtime-port", type=int, help="Port number for the server")
-    argument_parser.add_argument("--plugin-port", type=int, help="Port number for the server")
-    argument_parser.add_argument("--plugin", help="Name of the plugin to load")
-    argument_parser.add_argument("--home", help="Home directory for RPP")
-    argument_parser.add_argument("--component-path", help="Path to component directory")
+    argument_parser = argparse.ArgumentParser(
+        description="RPP Component Server for Python plugins")
+    argument_parser.add_argument("--host",
+            help="Host address for the server")
+    argument_parser.add_argument("--port",
+            type=int, help="Port number for the server")
+    argument_parser.add_argument("--home",
+            help="Home directory for RPP")
+    argument_parser.add_argument("--path",
+            help="Path to component directory")
+    argument_parser.add_argument('--conn',
+            action='append', required=True)
+    argument_parser.add_argument('--plugin',
+            action='append', required=True)
     args = argument_parser.parse_args()
 
-    library_manager = LibraryManager(rpp_home=args.home)
-    plugin_info = library_manager.get_plugin_info_from_lib(args.plugin)
-    loader = PythonPluginLoader(library_manager=library_manager, available_plugins={args.plugin: plugin_info})
+    if len(args.conn) == 0 or len(args.plugin) == 0 or len(args.path) == 0:
+        raise ValueError("At least one --conn, --plugin, and --path argument must be provided.")
 
-    instance = loader.create_instance(args.plugin)
-    server_info = AdapterServerParams(host=args.host, port=args.plugin_port,
-            backend=instance, plugin_name=plugin_info["PluginName"])
-    server = PluginAdapter.create_server(library_manager=library_manager,
-            plugin_info=plugin_info, server_info=server_info)
+    if len(args.path) != len(args.conn) or len(args.name) != len(args.plugin):
+        raise ValueError("The number of --name, --conn, and --plugin arguments must be the same.")
 
-    host = RppServerHost(host=args.host, runtime_port=args.runtime_port)
-    host.add_server(server)
+    host = RppServerHost(host=args.host, port=args.port)
+    for path, conn, plugin in zip(args.name, args.conn, args.plugin):
+
+        library_manager = LibraryManager(rpp_home=args.home)
+        plugin_info = library_manager.get_plugin_info_from_lib(plugin_name=plugin)
+        loader = PythonPluginLoader(
+            library_manager=library_manager, available_plugins={plugin: plugin_info})
+
+        instance = loader.create_instance(plugin)
+        server_info = AdapterServerParams(
+            backend=instance, plugin_name=plugin_info["PluginName"],
+            name=f"{conn}_server", connection_name=conn)
+        server = PluginAdapter.create_server(library_manager=library_manager,
+                plugin_info=plugin_info, server_info=server_info)
+        host.add_server(server)
     host.run()
     print("Exiting...")
 
