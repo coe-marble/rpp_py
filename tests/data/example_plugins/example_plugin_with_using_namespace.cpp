@@ -1,11 +1,11 @@
-#include <rpp_plugin_types/rpp_common/MotionController2D.hpp>
+#include <rpp_plugin_types/rpp_testing/MotionController2D.hpp>
 
 
 std::map<std::string, std::string> COMPONENTS = {
-    {"ctl1", "rpp_common::MotionController2D"},
+    {"ctl1", "rpp_testing::MotionController2D"},
 };
 
-using namespace rpp_common;
+using namespace rpp_testing;
 
 class ComponentPluginWithUsingNamespace : public MotionController2D
 {

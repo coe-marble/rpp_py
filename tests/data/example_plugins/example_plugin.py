@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 
-from rpp_plugin_types.rpp_common import MotionController2D
-from rpp_plugin_types.rpp_common import DisturbanceGenerator2D
+from rpp_plugin_types.rpp_testing import MotionController2D
+from rpp_plugin_types.rpp_testing import DisturbanceGenerator2D
 
 
 COMPONENTS = {
-    "ctl_main": "rpp_common::MotionController2D",
-    "ctl_disturbance": "rpp_common::DisturbanceGenerator2D",
+    "ctl_main": "rpp_testing::MotionController2D",
+    "ctl_disturbance": "rpp_testing::DisturbanceGenerator2D",
 }
 
 class ComponentPluginPy(MotionController2D):

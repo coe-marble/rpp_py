@@ -1,13 +1,13 @@
 
 
 from dataclasses import dataclass
-from rpp_common import RPP_Plugin
+from rpp_py.plugin import Plugin
 
 
 @dataclass
 class AdapterServerParams:
     """Information about the adapter server."""
-    backend: RPP_Plugin
+    backend: Plugin
     plugin_name: str
     name: str = None
     connection_name: str = None

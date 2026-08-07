@@ -35,10 +35,10 @@ class PythonPluginLoader:
             raise ImportError(f"Plugin {plugin_name} is not available.")
 
         plugin_info = self.available_plugins[plugin_name]
-        plugin_path = plugin_info["PluginPath"]
+        source_file = plugin_info["SourceFile"]
         library_name = plugin_info["Library"]
         plugin_id = self._lm.plugin_id_from_name(plugin_name)  # Ensure the plugin name is valid
-        module_path = self._lm.get_plugin_path_absolute(plugin_path, library_name)  # Ensure the plugin path is valid
+        module_path = self._lm.get_plugin_path_absolute(source_file, library_name)  # Ensure the plugin path is valid
         spec = importlib.util.spec_from_file_location(plugin_id, module_path)
         if spec is None:
             raise ImportError(f"Cannot find module {plugin_name} at {module_path}")

@@ -1,11 +1,11 @@
-#include <rpp_plugin_types/rpp_common/MotionController2D.hpp>
+#include <rpp_plugin_types/rpp_testing/MotionController2D.hpp>
 
 
 std::map<std::string, std::string> COMPONENTS = {
-    {"ctl1", "rpp_common::MotionController2D"},
+    {"ctl1", "rpp_testing::MotionController2D"},
 };
 
-class ComponentPlugin : public rpp_common::MotionController2D
+class ComponentPlugin : public rpp_testing::MotionController2D
 {
 
 public:
@@ -13,7 +13,7 @@ public:
 
     virtual ~ComponentPlugin() = default;
 
-    rpp_common::MotionController2D::VectorPlanar step(rpp_common::MotionController2D::Pose2D state, double dt) override
+    rpp_testing::MotionController2D::VectorPlanar step(rpp_testing::MotionController2D::Pose2D state, double dt) override
     {
         auto a = 5;
     }
