@@ -108,8 +108,6 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         result = instance.validate(msg)
         self.assertTrue(result, "Expected the validation to pass for the test plugin.")
 
-
-
     def test_load_and_execute_plugin_local_network(self):
 
 

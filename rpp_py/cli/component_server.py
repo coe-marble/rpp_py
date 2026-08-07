@@ -19,7 +19,8 @@ def main():
     argument_parser.add_argument("--home",
             help="Home directory for RPP")
     argument_parser.add_argument("--path",
-            help="Path to component directory")
+            help="Path to component directory",
+            action='append', required=True)
     argument_parser.add_argument('--conn',
             action='append', required=True)
     argument_parser.add_argument('--plugin',
@@ -29,11 +30,14 @@ def main():
     if len(args.conn) == 0 or len(args.plugin) == 0 or len(args.path) == 0:
         raise ValueError("At least one --conn, --plugin, and --path argument must be provided.")
 
-    if len(args.path) != len(args.conn) or len(args.name) != len(args.plugin):
-        raise ValueError("The number of --name, --conn, and --plugin arguments must be the same.")
+    if len(args.path) != len(args.conn) or len(args.path) != len(args.plugin):
+        print(f"Number of --path arguments: {len(args.path)}")
+        print(f"Number of --conn arguments: {len(args.conn)}")
+        print(f"Number of --plugin arguments: {len(args.plugin)}")
+        raise ValueError("The number of --path, --conn, and --plugin arguments must be the same.")
 
     host = RppServerHost(host=args.host, port=args.port)
-    for path, conn, plugin in zip(args.name, args.conn, args.plugin):
+    for path, conn, plugin in zip(args.path, args.conn, args.plugin):
 
         library_manager = LibraryManager(rpp_home=args.home)
         plugin_info = library_manager.get_plugin_info_from_lib(plugin_name=plugin)
