@@ -5,7 +5,7 @@ from rpp_plugin_registrator.library_manager import LibraryManager
 from rpp_py.adapter_info import AdapterServerParams
 from rpp_py.capnp_runtime import CapnpRuntime
 from rpp_py.plugin_runtime import PluginRuntimeServer
-from rpp_py.python_plugin_loader import PluginAdapter, PythonPluginLoader
+from rpp_py.plugin_loader import PluginAdapter, PythonPluginLoader
 from rpp_py.rpp_server_host import RppServerHost
 
 def main():

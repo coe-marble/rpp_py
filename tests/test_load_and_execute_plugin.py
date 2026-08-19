@@ -3,31 +3,31 @@ from pathlib import Path
 
 import unittest
 import sys
-import capnp
 from rpp_orchestrator.workspace import Workspace
 
 import rpp_plugin_registrator.registry_config as rp
+from rpp_py.clock import ClockOptions
+from rpp_py.context_builder import ComponentContextBuilder
+from rpp_py.data_manager import DataManager
 
 sys.path.append(str(Path(__file__).parent.parent.parent / "rpp_py"))
 
-
-
 from rpp_py.client_context import ClientContext
 from rpp_py.plugin_runtime import PluginRuntimeClient, PluginRuntimeServer
-from rpp_py.python_plugin_loader import (
+from rpp_py.plugin_loader import (
     PluginAdapter, PythonPluginLoader
 )
 from rpp_py.adapter_info import AdapterServerParams, AdapterClientParams
 from rpp_py.capnp_runtime import CapnpRuntime
-import time
 import subprocess, os
 import socket
 
 
+RPP_TESTING_PATH = Path(__file__).parent.parent.parent.resolve() \
+    / "rpp_testing" / "rpp_testing"
+EXAMPLES_DATA_PATH = RPP_TESTING_PATH / "data"
+
 class TestLoadAndExecutePlugin(unittest.TestCase):
-
-
-
 
     @classmethod
     def source_ros_workspace(cls):
@@ -51,7 +51,9 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         os.environ["RPP_WHITELIST_PLUGIN_TYPES"] = \
             "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D"
         whitelist = [
-            "example_plugin_simple_cpp.cpp", "example_plugin_simple_py.py"
+            "example_plugin_simple_cpp.cpp",
+            "example_plugin_simple_py.py",
+            "example_plugin_complex_py.py",
         ]
         cls.rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=whitelist)
         cls.library_manager = cls.rpp_handle.library_manager
@@ -312,3 +314,47 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
         # 3. Standardni sinkroni unittest asserti
         self.assertTrue(is_valid)
         server_p.terminate()
+
+
+    def test_complex_instance_plugin_using_context_builder(self):
+
+        component_path = EXAMPLES_DATA_PATH / "test_component_py"
+        data_manager = DataManager(library_manager=self.library_manager)
+        context_builder = ComponentContextBuilder(
+            data_manager=data_manager, clock_options=ClockOptions())
+        component_context = context_builder.build_from_component_path(str(component_path))
+
+        self.assertIsNotNone(component_context, "Component context should not be None.")
+        self.assertTrue(hasattr(component_context, '_subcomponents'), "Component context should have subcomponents.")
+        self.assertTrue(hasattr(component_context, '_clock'), "Component context should have clock options.")
+
+
+        params = component_context._params
+
+        class TestClass:
+            def __init__(self, a=0, b=0):
+                self.a = a
+                self.b = b
+
+        self.assertEqual(params.get("param1"), 1, "param1 should be 1")
+        self.assertEqual(params.get("param2"), 2, "param2 should be 2")
+        self.assertEqual(params.get("param3"), "set_string", "param3 should be 'set_string'")
+        self.assertEqual(params.get("param7"), {"a": 10, "b": 20}, "param7 should be an instance of SuperClass with a=10 and b=20")
+        self.assertEqual(params.get("param4"), True, "param4 should be True")
+        self.assertEqual(params.get("param5"), [1, 2, 3], "param5 should be [1, 2, 3]")
+        self.assertEqual(params.get("param6"), {"key1": "value1", "key2": 2}, "param6 should be {'key1': 'value1', 'key2': 2}")
+
+        res = params.get_as("param7", TestClass)
+        self.assertIsInstance(res, TestClass, "param7 should be an instance of TestClass")
+        self.assertEqual(res.a, 10, "param7.a should be 10")
+        self.assertEqual(res.b, 20, "param7.b should be 20")
+
+
+        instance = component_context.get_instance()
+        self.assertIsNotNone(instance, "Instance should not be None.")
+
+        component1 = component_context.get_component("ctl_main")
+        self.assertIsNotNone(component1, "Component 'ctl_main' should not be None.")
+
+        with self.assertRaises(RuntimeError):
+            component_context.get_component("non_existing_component")
