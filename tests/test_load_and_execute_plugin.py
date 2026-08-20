@@ -10,8 +10,6 @@ from rpp_py.clock import ClockOptions
 from rpp_py.context_builder import ComponentContextBuilder
 from rpp_py.data_manager import DataManager
 
-sys.path.append(str(Path(__file__).parent.parent.parent / "rpp_py"))
-
 from rpp_py.client_context import ClientContext
 from rpp_py.plugin_runtime import PluginRuntimeClient, PluginRuntimeServer
 from rpp_py.plugin_loader import (
@@ -33,7 +31,7 @@ class TestLoadAndExecutePlugin(unittest.TestCase):
     def source_ros_workspace(cls):
         # get current path of the script
         current_path = Path(__file__).parent.resolve()
-        rpp_source_path = current_path.parent.parent / "install" / "setup.bash"
+        rpp_source_path = current_path.parent.parent.parent.parent / "install" / "setup.bash"
         env = subprocess.check_output(["bash", "-c", "source " + str(rpp_source_path) + " && env"], text=True)
         for line in env.splitlines():
             key, _, value = line.partition("=")
