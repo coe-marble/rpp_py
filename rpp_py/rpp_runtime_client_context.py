@@ -5,7 +5,7 @@ import capnp
 from rpp_py.capnp_runtime import CapnpRuntime
 
 
-class ClientContext:
+class RppRuntimeClientContext:
     def __init__(self, host: str, port: int, runtime=None):
         self.host = host
         self.port = port
@@ -21,6 +21,10 @@ class ClientContext:
     def get_runtime(self):
         return self.runtime
 
+    @property
+    def is_started(self) -> bool:
+        return self._stream is not None
+
     def get_client(self):
         return self._rpc_client.bootstrap()
 
@@ -30,10 +34,10 @@ class ClientContext:
             try:
                 self._stream = await capnp.AsyncIoStream.create_connection(self.host, self.port)
                 self._rpc_client = capnp.TwoPartyClient(self._stream)
-                return True
-            except Exception:
+                return True, None
+            except Exception as e:
                 if timeout is not None and timeout <= 0:
-                    return False
+                    return False, e
                 if timeout is not None:
                     timeout -= 100  # Decrease timeout by 100 ms
                 await asyncio.sleep(0.1)  # Wait for 100 ms before retrying
@@ -41,6 +45,8 @@ class ClientContext:
 
     async def stop(self):
         await self.runtime.stop()
+        self._rpc_client = None
+        self._stream = None
 
 
     async def __aenter__(self):

@@ -9,16 +9,22 @@ import json
 
 
 class DataManager:
-    def __init__(self, library_manager=None):
+    def __init__(
+            self, library_manager=None,
+            workspace_path: str | Path | None = None):
         self.lm = library_manager if library_manager is not None else LibraryManager()
+        self.workspace_path = self._normalize_workspace_path(workspace_path)
 
     def load_script_description(self, script_path: str) -> ScriptDescription:
         with open(script_path, 'r', encoding='utf-8') as description_file:
             description_json = json.load(description_file)
             return ScriptDescription(
-                script_path=script_path,
+                script_path=Path(script_path),
                 language=description_json.get("Language", ""),
-                components=description_json.get("Components", {}),
+                configurations=description_json.get("Configurations", {}),
+                active_configuration=description_json.get(
+                    "ActiveConfiguration", ""
+                ),
                 spec=description_json.get("Spec", {})
             )
 
@@ -40,6 +46,55 @@ class DataManager:
         ws_folder = self._search_for_workspace_folder(script_path)
         name = Path(script_path).stem
         return str(ws_folder / "script_descriptions" / f"{name}.json")
+
+    def get_script_description_path_from_library(
+            self, library_name: str, script_name: str) -> str:
+        if self.workspace_path is None:
+            raise RuntimeError(
+                "A workspace path is required to resolve a script by library and name."
+            )
+
+        if "::" in script_name:
+            script_library, unqualified_name = script_name.split("::", 1)
+            if script_library != library_name:
+                raise ValueError(
+                    f"Script '{script_name}' does not belong to library "
+                    f"'{library_name}'."
+                )
+        else:
+            unqualified_name = script_name
+        qualified_name = f"{library_name}::{unqualified_name}"
+        descriptions_path = self.workspace_path / "script_descriptions"
+        if not descriptions_path.is_dir():
+            raise RuntimeError(
+                f"Script descriptions folder not found: {descriptions_path}"
+            )
+
+        matches = []
+        for description_path in sorted(descriptions_path.glob("*.json")):
+            try:
+                with description_path.open(encoding="utf-8") as description_file:
+                    description = json.load(description_file)
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            stored_library = description.get("ScriptLibrary")
+            stored_name = description.get("ScriptName")
+            if stored_library == library_name and stored_name in {
+                    unqualified_name, qualified_name}:
+                matches.append(description_path)
+
+        if not matches:
+            raise RuntimeError(
+                f"Script '{qualified_name}' is not present in workspace "
+                f"'{self.workspace_path.parent}'."
+            )
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple descriptions found for script '{qualified_name}' in "
+                f"workspace '{self.workspace_path.parent}'."
+            )
+        return str(matches[0])
 
     def get_default_script_parts_folder_path(self, script_path: str) -> str:
         ws_folder = self._search_for_workspace_folder(script_path)
@@ -82,3 +137,11 @@ class DataManager:
             if current_path.parent == current_path:
                 raise RuntimeError(f"Could not find .rppws folder in parent directories of {script_path}")
             current_path = current_path.parent
+
+    @staticmethod
+    def _normalize_workspace_path(
+            workspace_path: str | Path | None) -> Path | None:
+        if workspace_path is None:
+            return None
+        path = Path(workspace_path).expanduser().resolve()
+        return path if path.name == ".rppws" else path / ".rppws"

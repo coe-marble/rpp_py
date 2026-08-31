@@ -8,15 +8,17 @@ class LogLevel:
 
 class LoggerOptions:
     def __init__(self,
-            level=LogLevel.INFO, name="rpp_logger"):
+            level=LogLevel.DEBUG, name="rpp_logger"):
         self.level = level
         self.name = name
 
 
 class RppLogger:
-    def __init__(self, options=None):
+    def __init__(self, options : LoggerOptions | str | None=None):
         if options is None:
             options = LoggerOptions()
+        elif isinstance(options, str):
+            options = LoggerOptions(name=options)
         self.options = options
 
         try:
@@ -29,10 +31,13 @@ class RppLogger:
 
     def _inspect_caller(self):
         frame = inspect.currentframe()
-        caller_frame = frame.f_back.f_back
-        file = caller_frame.filename  # Dohvaća putanju/ime datoteke pozivatelja
-        line = caller_frame.lineno
-        return file, line
+        try:
+            caller_frame = frame.f_back.f_back if frame and frame.f_back else None
+            if caller_frame is None:
+                return "<unknown>", 0
+            return caller_frame.f_code.co_filename, caller_frame.f_lineno
+        finally:
+            del frame
 
 
     def debug(self, message):
@@ -41,7 +46,7 @@ class RppLogger:
                 self._ros_logger.debug(message)
             else:
                 file, line = self._inspect_caller()
-                print(f"[DEBUG] ({file}:{line})\n{message}")
+                print(f"[DEBUG] [{self.options.name}] ({file}:{line})\n{message}")
 
     def info(self, message):
         if self.options.level <= LogLevel.INFO:
@@ -49,7 +54,7 @@ class RppLogger:
                 self._ros_logger.info(message)
             else:
                 file, line = self._inspect_caller()
-                print(f"[INFO] ({file}:{line})\n{message}")
+                print(f"[INFO] [{self.options.name}] ({file}:{line})\n{message}")
 
     def warn(self, message):
         if self.options.level <= LogLevel.WARN:
@@ -57,7 +62,7 @@ class RppLogger:
                 self._ros_logger.warn(message)
             else:
                 file, line = self._inspect_caller()
-                print(f"[WARN] ({file}:{line})\n{message}")
+                print(f"[WARN] [{self.options.name}] ({file}:{line})\n{message}")
 
     def warning(self, message):
         self.warn(message)
@@ -68,4 +73,4 @@ class RppLogger:
                 self._ros_logger.error(message)
             else:
                 file, line = self._inspect_caller()
-                print(f"[ERROR] ({file}:{line})\n{message}")
+                print(f"[ERROR] [{self.options.name}] ({file}:{line})\n{message}")

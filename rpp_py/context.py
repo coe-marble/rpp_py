@@ -36,13 +36,41 @@ class ComponentContext:
             params: Parameters=None,
             subcomponents : Dict[str, 'ComponentContext']=None,
             spec: Dict[str, str]=None,
-            clock_options=None, logger=None):
+            clock_options=None, logger=None, runtime=None):
         self._instance = instance
         self._params = params or Parameters()
         self._subcomponents = subcomponents or {}
         self._spec = spec or {}
         self._clock = clock_factory(clock_options)
         self._logger = logger or RppLogger()
+        self._runtime = runtime
+
+
+    async def start(self):
+        started_subcontexts = []
+        try:
+            for subcontexts in self._subcomponents.values():
+                if not isinstance(subcontexts, list):
+                    subcontexts = [subcontexts]
+                for subcontext in subcontexts:
+                    await subcontext.start()
+                    started_subcontexts.append(subcontext)
+            if self._runtime is not None:
+                await self._runtime.start()
+        except Exception:
+            for subcontext in reversed(started_subcontexts):
+                await subcontext.stop()
+            raise
+
+
+    async def stop(self):
+        if self._runtime is not None:
+            await self._runtime.stop()
+        for subcontexts in reversed(list(self._subcomponents.values())):
+            if not isinstance(subcontexts, list):
+                subcontexts = [subcontexts]
+            for subcontext in reversed(subcontexts):
+                await subcontext.stop()
 
 
     def initialize(self):
@@ -52,7 +80,7 @@ class ComponentContext:
             for subcontext in subcontexts:
                 if hasattr(subcontext, "initialize"):
                     subcontext.initialize()
-        if hasattr(self._instance, "initialize"):
+        if self._runtime is None and hasattr(self._instance, "initialize"):
             self._instance.initialize(self)
 
 
@@ -82,6 +110,10 @@ class ComponentContext:
             return [subcontext.get_instance() for subcontext in component_context]
         return component_context[0].get_instance()
 
+    def get_components(self, slot_name):
+        component_contexts = self.get_subcomponent_contexts(slot_name)
+        return [context.get_instance() for context in component_contexts]
+
     def list_subcomponents(self):
         return list(self._subcomponents.keys())
 
@@ -90,3 +122,6 @@ class ComponentContext:
 
     def get_subcomponent_context(self, slot_name) -> 'ComponentContext':
         return self._subcomponents.get(slot_name, None)
+
+    def get_subcomponent_contexts(self, slot_name):
+        return self._subcomponents.get(slot_name, [])

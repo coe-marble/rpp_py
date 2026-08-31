@@ -119,7 +119,9 @@ class PluginAdapter:
 
 
     @staticmethod
-    def create_client(library_manager: LibraryManager, plugin_info: Dict[str, str], client_info: AdapterClientParams):
+    def create_client(
+            library_manager: LibraryManager, plugin_info: Dict[str, str],
+            client_info: AdapterClientParams, logger=None):
         library_name = plugin_info["PluginTypeLibrary"]
         plugin_class_name = plugin_info["PluginTypeClassName"]
         plugin_type = plugin_info["PluginType"]
@@ -128,12 +130,14 @@ class PluginAdapter:
         client_class_name = f"{plugin_class_name}_AdapterClient"
 
         instance = PluginAdapter._load_class_from_module( \
-                client_class_name, library_name, plugin_type, module_id)()
+                client_class_name, library_name, plugin_type, module_id)(logger=logger)
         instance.configure_adapter_client__(client_info)
         return instance
 
     @staticmethod
-    def create_server(library_manager: LibraryManager, plugin_info: Dict[str, str], server_info: AdapterServerParams):
+    def create_server(
+            library_manager: LibraryManager, plugin_info: Dict[str, str],
+            server_info: AdapterServerParams, logger=None):
         library_name = plugin_info["PluginTypeLibrary"]
         plugin_class_name = plugin_info["PluginTypeClassName"]
         plugin_type = plugin_info["PluginType"]
@@ -141,6 +145,6 @@ class PluginAdapter:
         module_id = f"{library_manager.plugin_id_from_name(plugin_type)}_server"
         server_class_name = f"{plugin_class_name}_AdapterServer"
         instance = PluginAdapter._load_class_from_module( \
-            server_class_name, library_name, plugin_type, module_id)()
+            server_class_name, library_name, plugin_type, module_id)(logger=logger)
         instance.configure_adapter_server__(server_info)
         return instance
