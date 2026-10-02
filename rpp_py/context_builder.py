@@ -97,6 +97,14 @@ class ComponentContextBuilder:
             description_path, configuration=configuration
         )
 
+    def build_script_from_description_path(
+            self, script_description_path: str | Path, *,
+            configuration: str | None = None) -> ComponentContext:
+        """Build a script context from an explicit description path."""
+        return self._build_script_from_description_path(
+            script_description_path, configuration=configuration
+        )
+
     def _build_script_from_description_path(
             self, script_description_path, parts_folder="", configuration=None):
         script_description = self.data_manager.load_script_description(script_description_path)

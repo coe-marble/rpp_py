@@ -85,6 +85,12 @@ class DataManager:
                 matches.append(description_path)
 
         if not matches:
+            direct_description = descriptions_path / f"{unqualified_name}.json"
+            if (
+                self.workspace_path.parent.name == library_name
+                and direct_description.is_file()
+            ):
+                return str(direct_description)
             raise RuntimeError(
                 f"Script '{qualified_name}' is not present in workspace "
                 f"'{self.workspace_path.parent}'."
