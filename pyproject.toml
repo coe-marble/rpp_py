@@ -1,3 +1,17 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpp-py"
+version = "0.1.0"
+description = "Python implementation of RPP plugin system"
+
+[project.scripts]
+rpp_component_server_python = "rpp_py.cli.component_server:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["rpp_py", "rpp_py.*"]
