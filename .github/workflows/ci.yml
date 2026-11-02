@@ -20,11 +20,11 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       QT_QPA_PLATFORM: offscreen
-      ROS_DISTRO: jazzy
+      ROS_DISTRO: lyrical
     steps:
       - uses: ros-tooling/setup-ros@v0.7
         with:
-          required-ros-distributions: jazzy
+          required-ros-distributions: lyrical
       - name: Check out repository under test
         uses: actions/checkout@v4
         with:
@@ -67,7 +67,7 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Build the C++ runtime
         run: |
-          source /opt/ros/jazzy/setup.bash
+          source /opt/ros/lyrical/setup.bash
           export PATH="$PWD/.venv/bin:$PATH"
           colcon build --base-paths rpp_dev/src/rpp_cpp --symlink-install --cmake-args -DBUILD_TESTING=OFF -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
           rpp registry config set RPP_CPP_CORE_PATH "$PWD/build/rpp_cpp"
