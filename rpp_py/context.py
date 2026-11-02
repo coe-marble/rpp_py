@@ -1,6 +1,7 @@
 
 from typing import Dict
 
+from rpp_common.component_slots import parse_component_slot_type
 from rpp_py.clock import clock_factory, Clock
 from rpp_py.logger import RppLogger
 from rpp_py.parameter_handler import Parameters
@@ -23,12 +24,7 @@ class ComponentContext:
             tuple[str, bool]: A tuple containing the component type and
             a boolean indicating if it allows a list of components.
         """
-        if slot_type.startswith("List[") and slot_type.endswith("]"):
-            return slot_type[5:-1], True  # Extract the component type from "List[ComponentType]" and return True for allow_list
-        elif slot_type.startswith("Options[") and slot_type.endswith("]"):
-            return slot_type[8:-1], True  # Extract the component type from "Options[ComponentType]" and return True for allow_list
-        else:
-            return slot_type, False  # Return the original type and False for allow_list if it's a single component
+        return parse_component_slot_type(slot_type)
 
 
     def __init__(self,

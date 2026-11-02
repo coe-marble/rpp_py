@@ -3,7 +3,7 @@ import sys
 import os
 from typing import List
 
-from rpp_py.parameter_description import ParameterDescription
+from rpp_common.parameter_description import ParameterDescription
 
 
 class Parameters:

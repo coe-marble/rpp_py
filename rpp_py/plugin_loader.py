@@ -1,59 +1,65 @@
 
 
-import os
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Dict
 
 from rpp_plugin_registrator.library_manager import LibraryManager
 from rpp_plugin_registrator.registry_config import get_app_interfaces_path
 from rpp_py.adapter_info import AdapterServerParams, AdapterClientParams
 
-def import_module_from_path(module_path: str, allow_relative_imports=False):
-    if not os.path.exists(module_path):
+def import_module_from_path(module_path: str | Path, allow_relative_imports: bool = False):
+    path = Path(module_path).resolve()
+    if not path.is_file():
         raise ValueError(f"Module path '{module_path}' does not exist.")
-    module_name = os.path.splitext(os.path.basename(module_path))[0]
+    module_name = path.stem
     if not allow_relative_imports:
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             raise ValueError(f"Could not find module '{module_name}' at path '{module_path}'.")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
-    path = Path(module_path).resolve()
-    module_name = path.stem
-    parent_dir = path.parent
-    package_name = parent_dir.name
 
-    path_added = False
-    if str(parent_dir) not in sys.path:
-        path_added = True
-        sys.path.insert(0, str(parent_dir))
+    parent_dir = path.parent
+    path_hash = hashlib.sha256(str(parent_dir).encode("utf-8")).hexdigest()[:16]
+    package_name = f"_rpp_plugin_{path_hash}"
+    qualified_name = f"{package_name}.{module_name}"
+
+    cached_module = sys.modules.get(qualified_name)
+    cached_path = getattr(cached_module, "__file__", None)
+    if cached_module is not None and cached_path and Path(cached_path).resolve() == path:
+        return cached_module
+
+    package_created = package_name not in sys.modules
+    if package_created:
+        package = ModuleType(package_name)
+        package.__path__ = [str(parent_dir)]
+        package.__package__ = package_name
+        package.__file__ = str(parent_dir / "__init__.py")
+        sys.modules[package_name] = package
 
     spec = importlib.util.spec_from_file_location(
-        f"{package_name}.{module_name}",
+        qualified_name,
         str(path)
     )
 
-    if spec is None:
+    if spec is None or spec.loader is None:
         raise ImportError(f"Unable to create specification for module {module_path}")
 
     module = importlib.util.module_from_spec(spec)
-
-    module.__package__ = package_name
-    module.__path__ = [str(parent_dir)]
-    sys.modules[package_name] = sys.modules.get(package_name, module)
-    sys.modules[f"{package_name}.{module_name}"] = module
+    sys.modules[qualified_name] = module
     try:
         spec.loader.exec_module(module)
         return module
-    except Exception as e:
-        # Čišćenje u slučaju greške
-        sys.modules.pop(f"{package_name}.{module_name}", None)
-        if path_added:
-            sys.path = sys.path[1:]
-        raise e
+    except Exception:
+        sys.modules.pop(qualified_name, None)
+        if package_created:
+            sys.modules.pop(package_name, None)
+        raise
 
 
 class PythonPluginLoader:
@@ -76,9 +82,6 @@ class PythonPluginLoader:
         return plugin_class()
 
     def _load_plugin(self, plugin_name: str):
-        import importlib.util
-        import sys
-
         if self.available_plugins is not None:
             if plugin_name not in self.available_plugins:
                 raise ImportError(f"Plugin {plugin_name} is not available.")
@@ -97,24 +100,25 @@ class PluginAdapter:
 
 
     @staticmethod
-    def _load_class_from_module(client_class_name: str, library_name: str, plugin_type: str, module_id: str):
+    def _load_class_from_module(client_class_name: str, library_name: str, plugin_type: str):
         interfaces_path = get_app_interfaces_path() / "python"
         interfaces_path_str = str(interfaces_path)
         if interfaces_path_str not in sys.path:
-            assert False, f"Interfaces path {interfaces_path_str} is not in sys.path. Current sys.path: {sys.path}"
+            raise ImportError(
+                f"RPP Python interfaces path is not available: {interfaces_path_str}"
+            )
 
         client_path = interfaces_path / "rpp_plugin_types" / library_name / f"{client_class_name}.py"
 
-        if module_id in sys.modules:
-            module = sys.modules[module_id]
-        else:
-            module = import_module_from_path(str(client_path), allow_relative_imports=True)
+        module = import_module_from_path(str(client_path), allow_relative_imports=True)
 
         # Get the class from the module and create an instance
         client_class = getattr(module, client_class_name, None)
 
         if client_class is None:
-            raise AttributeError(f"Client class for plugin type '{plugin_type}' not found in module '{module_id}'")
+            raise AttributeError(
+                f"Client class for plugin type '{plugin_type}' not found in '{client_path}'"
+            )
         return client_class
 
 
@@ -125,12 +129,10 @@ class PluginAdapter:
         library_name = plugin_info["PluginTypeLibrary"]
         plugin_class_name = plugin_info["PluginTypeClassName"]
         plugin_type = plugin_info["PluginType"]
-        module_id = f"{library_manager.plugin_id_from_name(plugin_type)}_client"
-
         client_class_name = f"{plugin_class_name}_AdapterClient"
 
-        instance = PluginAdapter._load_class_from_module( \
-                client_class_name, library_name, plugin_type, module_id)(logger=logger)
+        instance = PluginAdapter._load_class_from_module(
+                client_class_name, library_name, plugin_type)(logger=logger)
         instance.configure_adapter_client__(client_info)
         return instance
 
@@ -142,9 +144,8 @@ class PluginAdapter:
         plugin_class_name = plugin_info["PluginTypeClassName"]
         plugin_type = plugin_info["PluginType"]
 
-        module_id = f"{library_manager.plugin_id_from_name(plugin_type)}_server"
         server_class_name = f"{plugin_class_name}_AdapterServer"
-        instance = PluginAdapter._load_class_from_module( \
-            server_class_name, library_name, plugin_type, module_id)(logger=logger)
+        instance = PluginAdapter._load_class_from_module(
+            server_class_name, library_name, plugin_type)(logger=logger)
         instance.configure_adapter_server__(server_info)
         return instance

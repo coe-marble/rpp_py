@@ -4,17 +4,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Callable
 
-
-class ParameterDescription:
-    
-    def __init__(self, name: str, default_value: Any):
-        self.name = name
-        self.default_value = default_value
-
-
-
-def ParamSet(*items: ParameterDescription) -> list[ParameterDescription]:
-    return list(items)
+from rpp_common.parameter_description import ParameterDescription, ParamSet
 
 
 @dataclass

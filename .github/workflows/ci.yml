@@ -1,0 +1,74 @@
+name: Python runtime integration tests
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+      ROS_DISTRO: jazzy
+    steps:
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: jazzy
+      - name: Check out repository under test
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+      - name: Check out RPP integration dependencies
+        uses: actions/checkout@v4
+        with:
+          repository: coe-marble/rpp_dev
+          ref: develop
+          path: rpp_dev
+          submodules: recursive
+          token: ${{ secrets.RPP_CI_TOKEN || github.token }}
+      - name: Overlay the repository under test
+        run: rsync -a --delete --exclude=.git candidate/ rpp_dev/src/rpp_py/
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Cap'n Proto 1.1.0 and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl ninja-build libspdlog-dev nlohmann-json3-dev pybind11-dev
+          curl -fsSL https://github.com/capnproto/capnproto/archive/refs/tags/v1.1.0.tar.gz -o capnproto-1.1.0.tar.gz
+          tar -xzf capnproto-1.1.0.tar.gz
+          cmake -S capnproto-1.1.0 -B capnproto-build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build capnproto-build --parallel
+          sudo cmake --install capnproto-build
+          sudo ldconfig
+          test "$(capnp --version)" = "Cap'n Proto version 1.1.0"
+          echo /usr/local/bin >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=/usr/local:${CMAKE_PREFIX_PATH}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Install Python test dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          for package in rpp_dev/src/rpp_common rpp_dev/src/rpp_plugin_registrator rpp_dev/src/rpp_orchestrator rpp_dev/src/rpp_py rpp_dev/src/rpp_cli rpp_dev/src/rpp_testing; do
+            .venv/bin/python -m pip install --no-deps -e "$package"
+          done
+          .venv/bin/python -m pip install -e "rpp_dev/src/rpp_py[test]"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Build the C++ runtime
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          export PATH="$PWD/.venv/bin:$PATH"
+          colcon build --base-paths rpp_dev/src/rpp_cpp --symlink-install --cmake-args -DBUILD_TESTING=OFF -DPython3_EXECUTABLE="$PWD/.venv/bin/python"
+          rpp registry config set RPP_CPP_CORE_PATH "$PWD/build/rpp_cpp"
+      - name: Run tests
+        run: .venv/bin/python -m pytest rpp_dev/src/rpp_py/tests

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from rpp_py.parameter_description import ParameterDescription
+from rpp_common.parameter_description import ParameterDescription
 class Plugin:
 
     def reset(self):
