@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Python implementation of RPP plugin system"
 requires-python = ">=3.10"
 dependencies = [
+    "pydantic>=2,<3",
     "pycapnp>=1.3,<3",
     "rpp-common>=0.1,<0.2",
     "rpp-orchestrator>=0.1,<0.2",
