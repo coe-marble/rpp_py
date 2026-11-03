@@ -60,4 +60,4 @@ jobs:
           rpp --rpp-home "$RPP_HOME" init-home
           rpp --rpp-home "$RPP_HOME" registry config set RPP_CPP_CORE_PATH "$PWD/build/rpp_cpp"
       - name: Run tests
-        run: python -m pytest rpp_dev/src/rpp_py/tests
+        run: RPP_CPP_CORE_PATH="$PWD/build/rpp_cpp" python -m pytest rpp_dev/src/rpp_py/tests
