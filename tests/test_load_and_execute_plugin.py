@@ -3,10 +3,10 @@ from pathlib import Path
 import sys
 import threading
 import time
+import pytest
 
-import unittest
 import json
-from unittest.mock import Base, Mock
+from unittest.mock import Mock
 from rpp_orchestrator.workspace import Workspace
 
 import rpp_plugin_registrator.registry_config as rp
@@ -56,13 +56,9 @@ def write_config(home: Path, orig_cfg: dict):
         json.dump(orig_cfg, f, indent=4)
 
 
-class BaseTestLoadAndExecutePlugin(unittest.TestCase):
-
-    original_home = None
-    rpp_handle = None
-
-    @classmethod
-    def source_ros_workspace(cls):
+class BaseTestLoadAndExecutePlugin:
+    @staticmethod
+    def source_ros_workspace(monkeypatch):
         # get current path of the script
         current_path = Path(__file__).parent.resolve()
         rpp_source_path = current_path.parent.parent.parent.parent / "install" / "setup.bash"
@@ -70,25 +66,15 @@ class BaseTestLoadAndExecutePlugin(unittest.TestCase):
         for line in env.splitlines():
             key, _, value = line.partition("=")
             if key:
-                os.environ[key] = value
+                monkeypatch.setenv(key, value)
 
-    @classmethod
-    def reset_generated_interface_modules(cls):
+    @staticmethod
+    def reset_generated_interface_modules():
         """Prevent one temporary RPP home from leaking generated types to another."""
         for module_name in tuple(sys.modules):
             if module_name == "rpp_plugin_types" or \
                     module_name.startswith("rpp_plugin_types."):
                 sys.modules.pop(module_name, None)
-
-    @classmethod
-    def tearDownClass(cls):
-        # Restore the original RPP_HOME after tests
-        if hasattr(cls, 'rpp_handle') and cls.rpp_handle is not None:
-            cls.rpp_handle.td.cleanup()
-        rp.reset_module()
-        cls.reset_generated_interface_modules()
-        os.environ.pop("RPP_WHITELIST_PLUGIN_TYPES", None)
-        rp.RPP_HOME = cls.original_home
 
     def get_free_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -104,39 +90,47 @@ class BaseTestLoadAndExecutePlugin(unittest.TestCase):
         return message
 
 
+@pytest.fixture(scope="class")
+def native_rpp_runtime(request):
+    from rpp_cli.testing import setup_tmp_rpp_with_test_plugins
+
+    monkeypatch = pytest.MonkeyPatch()
+    BaseTestLoadAndExecutePlugin.source_ros_workspace(monkeypatch)
+    monkeypatch.setenv(
+        "RPP_WHITELIST_PLUGIN_TYPES",
+        "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D",
+    )
+    rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=[
+        "example_plugin_simple_py.py",
+        "example_plugin_complex_py.py",
+    ])
+    monkeypatch.setattr(rp, "RPP_HOME", rpp_handle.home)
+    request.cls.rpp_handle = rpp_handle
+    request.cls.library_manager = rpp_handle.library_manager
+    request.cls.ws = Workspace(rpp_handle.home / "workspace", rpp_handle.library_manager)
+    request.cls.test_lib = rpp_handle.test_lib
+    write_config(rpp_handle.home, rp.get_config())
+    try:
+        yield
+    finally:
+        rpp_handle.td.cleanup()
+        rp.reset_module()
+        BaseTestLoadAndExecutePlugin.reset_generated_interface_modules()
+        monkeypatch.undo()
+
+
+@pytest.mark.usefixtures("native_rpp_runtime")
 class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
-
-
-    @classmethod
-    def setUpClass(cls):
-        # setup registrator module and paths
-        from rpp_cli.testing import setup_tmp_rpp_with_test_plugins
-        cls.original_home = rp.RPP_HOME
-        cls.source_ros_workspace()
-
-        os.environ["RPP_WHITELIST_PLUGIN_TYPES"] = \
-            "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D"
-        whitelist = [
-            "example_plugin_simple_py.py",
-            "example_plugin_complex_py.py",
-        ]
-        cls.rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=whitelist)
-        cls.library_manager = cls.rpp_handle.library_manager
-        cls.ws = Workspace(cls.rpp_handle.home / "workspace", cls.library_manager)
-        cls.test_lib = cls.rpp_handle.test_lib
-        rp.RPP_HOME = cls.rpp_handle.home
-        cfg = rp.get_config()
-        write_config(cls.rpp_handle.home, cfg)
 
 
 
     def test_load_and_execute_plugin_py(self):
         # Assuming the plugin is located in the 'plugins' directory relative to this test file
         plugins = self.library_manager.get_library_plugins(self.test_lib, source_language="python")
-        self.assertTrue(len(plugins) > 0, "No plugins found in the test library.")
+        assert len(plugins) > 0, "No plugins found in the test library."
 
         test_plugin = plugins.get("test_lib::ComponentPluginSimplePy")
-        self.assertIsNotNone(test_plugin, "Test plugin not found.")
+        assert test_plugin is not None, "Test plugin not found."
 
         # Load the plugin
         loader = PythonPluginLoader(library_manager=self.library_manager, available_plugins=plugins)
@@ -151,18 +145,18 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         msg.pose.yaw = 0.5
 
         # except when setting non existig field
-        with self.assertRaises(Exception) as context:
+        with pytest.raises(Exception) as context:
             msg.non_existing_field = 10
             assert False, "Expected an exception when setting a non-existing field."
 
-        self.assertTrue("has no attribute 'non_existing_field'" in str(context.exception), "Unexpected exception message.")
+        assert "has no attribute 'non_existing_field'" in str(context.value), "Unexpected exception message."
 
         result = instance.validate(msg)
 
-        self.assertFalse(result, "Expected the validation to fail for the test plugin.")
+        assert not (result), "Expected the validation to fail for the test plugin."
         msg.pose.position.x = 6.0
         result = instance.validate(msg)
-        self.assertTrue(result, "Expected the validation to pass for the test plugin.")
+        assert result, "Expected the validation to pass for the test plugin."
 
     def _create_local_network_adapter_pair(self, plugin_name):
         plugins = self.library_manager.get_library_plugins(
@@ -224,12 +218,12 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         client_connected = False
         try:
             connected, error = client_executor.call(context.start())
-            self.assertTrue(connected, error)
+            assert connected, error
             client.connect_adapter_client__(context, executor=client_executor)
             client_connected = True
 
-            self.assertFalse(client.validate(self._odometry_message(interface, 1.0)))
-            self.assertTrue(client.validate(self._odometry_message(interface, 6.0)))
+            assert not (client.validate(self._odometry_message(interface, 1.0)))
+            assert client.validate(self._odometry_message(interface, 6.0))
         finally:
             if client_connected:
                 client.disconnect_adapter_client__()
@@ -251,8 +245,8 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
                 RppRuntimeClientContext(host=host, port=port))
             client_connected = True
 
-            self.assertFalse(client.validate(self._odometry_message(interface, 1.0)))
-            self.assertTrue(client.validate(self._odometry_message(interface, 6.0)))
+            assert not (client.validate(self._odometry_message(interface, 1.0)))
+            assert client.validate(self._odometry_message(interface, 6.0))
         finally:
             if client_connected:
                 client.disconnect_adapter_client__()
@@ -273,10 +267,10 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             client_connected = True
 
             async def validate_messages():
-                self.assertFalse(await client.validate_async(
+                assert not (await client.validate_async(
                     self._odometry_message(interface, 1.0)))
-                self.assertTrue(await client.validate_async(
-                    self._odometry_message(interface, 6.0)))
+                assert await client.validate_async(
+                    self._odometry_message(interface, 6.0))
 
             asyncio.run(validate_messages())
         finally:
@@ -328,18 +322,18 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
 
             client_executor.start()
             connected, error = client_executor.call(client_context.start())
-            self.assertTrue(connected, error)
+            assert connected, error
             client_executor.call(plugin_runtime_client.connect(client_context))
             plugin_client.connect_adapter_client__(
                 client_context, executor=client_executor)
             client_connected = True
 
             plugin_msg = self._odometry_message(plugin_client, 1.0)
-            self.assertFalse(plugin_client.validate(plugin_msg))
+            assert not (plugin_client.validate(plugin_msg))
 
             client_executor.call(plugin_runtime_client.ping())
             adapters = client_executor.call(plugin_runtime_client.listAdapters())
-            self.assertIsInstance(adapters, list, "Expected a list of adapters.")
+            assert isinstance(adapters, list), "Expected a list of adapters."
             client_executor.call(plugin_runtime_client.shutdown())
         finally:
             if client_connected:
@@ -372,8 +366,8 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         while server_host._executor is None and server_thread.is_alive():
             time.sleep(0.01)
 
-        self.assertIsNotNone(server_host._executor)
-        self.assertFalse(server_error)
+        assert server_host._executor is not None
+        assert not (server_error)
 
         client_connected = False
         runtime_client = PluginRuntimeClient()
@@ -381,9 +375,9 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             client.connect_adapter_client__(
                 RppRuntimeClientContext(host=host_name, port=port))
             client_connected = True
-            self.assertIsNotNone(client._owned_component_call_executor)
-            self.assertFalse(client.validate(self._odometry_message(interface, 1.0)))
-            self.assertTrue(client.validate(self._odometry_message(interface, 6.0)))
+            assert client._owned_component_call_executor is not None
+            assert not (client.validate(self._odometry_message(interface, 1.0)))
+            assert client.validate(self._odometry_message(interface, 6.0))
             # test that the runtime client can connect to the runtime server and shutdown it
             client._component_call_executor.call(
                 runtime_client.connect(client._runtime_client_context))
@@ -393,8 +387,8 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
                 client.disconnect_adapter_client__()
             server_thread.join(timeout=2)
 
-        self.assertFalse(server_thread.is_alive())
-        self.assertFalse(server_error)
+        assert not (server_thread.is_alive())
+        assert not (server_error)
 
     def test_complex_instance_plugin_using_context_builder(self):
 
@@ -405,9 +399,9 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         component_context = context_builder.build_component_from_path(
             str(component_path))
 
-        self.assertIsNotNone(component_context, "Component context should not be None.")
-        self.assertTrue(hasattr(component_context, '_subcomponents'), "Component context should have subcomponents.")
-        self.assertTrue(hasattr(component_context, '_clock'), "Component context should have clock options.")
+        assert component_context is not None, "Component context should not be None."
+        assert hasattr(component_context, '_subcomponents'), "Component context should have subcomponents."
+        assert hasattr(component_context, '_clock'), "Component context should have clock options."
 
 
         params = component_context._params
@@ -417,66 +411,76 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
                 self.a = a
                 self.b = b
 
-        self.assertEqual(params.get("param1"), 1, "param1 should be 1")
-        self.assertEqual(params.get("param2"), 2, "param2 should be 2")
-        self.assertEqual(params.get("param3"), "set_string", "param3 should be 'set_string'")
-        self.assertEqual(params.get("param7"), {"a": 10, "b": 20}, "param7 should be an instance of SuperClass with a=10 and b=20")
-        self.assertEqual(params.get("param4"), True, "param4 should be True")
-        self.assertEqual(params.get("param5"), [1, 2, 3], "param5 should be [1, 2, 3]")
-        self.assertEqual(params.get("param6"), {"key1": "value1", "key2": 2}, "param6 should be {'key1': 'value1', 'key2': 2}")
+        assert params.get("param1") == 1, "param1 should be 1"
+        assert params.get("param2") == 2, "param2 should be 2"
+        assert params.get("param3") == "set_string", "param3 should be 'set_string'"
+        assert params.get("param7") == {"a": 10, "b": 20}, "param7 should be an instance of SuperClass with a=10 and b=20"
+        assert params.get("param4") == True, "param4 should be True"
+        assert params.get("param5") == [1, 2, 3], "param5 should be [1, 2, 3]"
+        assert params.get("param6") == {"key1": "value1", "key2": 2}, "param6 should be {'key1': 'value1', 'key2': 2}"
 
         res = params.get_as("param7", TestClass)
-        self.assertIsInstance(res, TestClass, "param7 should be an instance of TestClass")
-        self.assertEqual(res.a, 10, "param7.a should be 10")
-        self.assertEqual(res.b, 20, "param7.b should be 20")
+        assert isinstance(res, TestClass), "param7 should be an instance of TestClass"
+        assert res.a == 10, "param7.a should be 10"
+        assert res.b == 20, "param7.b should be 20"
         instance = component_context.get_instance()
-        self.assertIsNotNone(instance, "Instance should not be None.")
+        assert instance is not None, "Instance should not be None."
 
         component1 = component_context.get_component("ctl_main")
-        self.assertIsNotNone(component1, "Component 'ctl_main' should not be None.")
+        assert component1 is not None, "Component 'ctl_main' should not be None."
 
-        with self.assertRaises(RuntimeError):
+        with pytest.raises(RuntimeError):
             component_context.get_component("non_existing_component")
 
 
 
 
+@pytest.fixture(scope="class")
+def adapter_rpp_runtime(request):
+    from rpp_cli.testing import setup_tmp_rpp_with_test_plugins
+
+    monkeypatch = pytest.MonkeyPatch()
+    BaseTestLoadAndExecutePlugin.source_ros_workspace(monkeypatch)
+    monkeypatch.setenv(
+        "RPP_WHITELIST_PLUGIN_TYPES",
+        "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D",
+    )
+    rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=[
+        "example_plugin_simple_cpp.cpp",
+        "example_plugin_simple_py.py",
+        "example_plugin_complex_cpp.cpp",
+        "example_plugin_complex_py.py",
+    ])
+    monkeypatch.setattr(rp, "RPP_HOME", rpp_handle.home)
+    request.cls.rpp_handle = rpp_handle
+    request.cls.library_manager = rpp_handle.library_manager
+    request.cls.ws = Workspace(rpp_handle.home / "workspace", rpp_handle.library_manager)
+    request.cls.component_record = request.cls.ws.create_component(
+        "ComponentPluginInstance", "test_lib::ComponentPluginSimpleCpp"
+    )
+    request.cls.test_lib = rpp_handle.test_lib
+    write_config(rpp_handle.home, rp.get_config())
+    try:
+        yield
+    finally:
+        rpp_handle.td.cleanup()
+        rp.reset_module()
+        BaseTestLoadAndExecutePlugin.reset_generated_interface_modules()
+        monkeypatch.undo()
+
+
+@pytest.mark.usefixtures("adapter_rpp_runtime")
 class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
-
-    @classmethod
-    def setUpClass(cls):
-        # setup registrator module and paths
-        from rpp_cli.testing import setup_tmp_rpp_with_test_plugins
-        cls.original_home = rp.RPP_HOME
-        cls.source_ros_workspace()
-
-        os.environ["RPP_WHITELIST_PLUGIN_TYPES"] = \
-            "rpp_testing::MotionController2D;rpp_testing::DisturbanceGenerator2D"
-        whitelist = [
-            "example_plugin_simple_cpp.cpp",
-            "example_plugin_simple_py.py",
-            "example_plugin_complex_cpp.cpp",
-            "example_plugin_complex_py.py",
-        ]
-        cls.rpp_handle = setup_tmp_rpp_with_test_plugins(component_whitelist=whitelist)
-        cls.library_manager = cls.rpp_handle.library_manager
-        cls.ws = Workspace(cls.rpp_handle.home / "workspace", cls.library_manager)
-        cls.component_record = \
-            cls.ws.create_component("ComponentPluginInstance", "test_lib::ComponentPluginSimpleCpp")
-        cls.test_lib = cls.rpp_handle.test_lib
-        rp.RPP_HOME = cls.rpp_handle.home
-        cfg = rp.get_config()
-        write_config(cls.rpp_handle.home, cfg)
 
     def test_load_and_execute_plugin_local_network_with_cpp(self):
         # Assuming the plugin is located in the 'plugins' directory relative to this test file
         plugins = self.library_manager.get_library_plugins(
                 self.test_lib, source_language="cpp")
-        self.assertTrue(len(plugins) > 0, "No plugins found in the test library.")
+        assert len(plugins) > 0, "No plugins found in the test library."
 
         plugin_info = self.library_manager \
             .get_plugin_info_from_lib("test_lib::ComponentPluginSimpleCpp")
-        self.assertIsNotNone(plugin_info, "Test plugin not found.")
+        assert plugin_info is not None, "Test plugin not found."
 
         host = "localhost"
         port = self.get_free_port()
@@ -513,15 +517,15 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
         client_connected = False
         try:
             connected, error = client_executor.call(context.start(1000))
-            self.assertTrue(connected, error)
+            assert connected, error
             client.connect_adapter_client__(context, executor=client_executor)
             client_connected = True
             client_executor.call(runtime_client.connect(context))
 
-            self.assertFalse(client.validate(
+            assert not (client.validate(
                 self._odometry_message(MotionController2D, 1.0)))
-            self.assertTrue(client.validate(
-                self._odometry_message(MotionController2D, 6.0)))
+            assert client.validate(
+                self._odometry_message(MotionController2D, 6.0))
         finally:
             if client_connected:
                 client.disconnect_adapter_client__()
@@ -553,13 +557,13 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
             message = python_component.Odometry2D()
 
             message.pose.position.x = 1.0
-            self.assertFalse(python_component.validate(message))
+            assert not (python_component.validate(message))
 
             message.pose.position.x = 6.0
-            self.assertFalse(python_component.validate(message))
+            assert not (python_component.validate(message))
 
             message.pose.position.x = 11.0
-            self.assertTrue(python_component.validate(message))
+            assert python_component.validate(message)
         finally:
             lifecycle_executor.call(component_context.stop())
             lifecycle_executor.stop()
