@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import os
+from copy import deepcopy
 from typing import List
 
 from rpp_common.parameter_description import ParameterDescription
@@ -58,7 +59,7 @@ class ParameterHandler:
                     resolved_parameters[param_name] = \
                         getattr(module_parameters, param_name)
                 else:
-                    resolved_parameters[param_name] = default_value
+                    resolved_parameters[param_name] = deepcopy(default_value)
         else:
             for param_info in description:
                 default_value = param_info.default_value
@@ -66,7 +67,7 @@ class ParameterHandler:
                     resolved_parameters[param_info.name] = \
                         getattr(module_parameters, param_info.name)
                 else:
-                    resolved_parameters[param_info.name] = default_value
+                    resolved_parameters[param_info.name] = deepcopy(default_value)
         return Parameters(resolved_parameters)
 
 

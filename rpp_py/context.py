@@ -55,18 +55,31 @@ class ComponentContext:
                 await self._runtime.start()
         except Exception:
             for subcontext in reversed(started_subcontexts):
-                await subcontext.stop()
+                try:
+                    await subcontext.stop()
+                except Exception as error:
+                    self._logger.error(f"Component startup rollback failed: {error!r}")
             raise
 
 
     async def stop(self):
+        errors = []
+        contexts = []
         if self._runtime is not None:
-            await self._runtime.stop()
+            contexts.append(self._runtime)
         for subcontexts in reversed(list(self._subcomponents.values())):
             if not isinstance(subcontexts, list):
                 subcontexts = [subcontexts]
-            for subcontext in reversed(subcontexts):
-                await subcontext.stop()
+            contexts.extend(reversed(subcontexts))
+        for context in contexts:
+            try:
+                await context.stop()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            for error in errors[1:]:
+                self._logger.error(f"Additional component shutdown failure: {error!r}")
+            raise errors[0]
 
 
     def initialize(self):

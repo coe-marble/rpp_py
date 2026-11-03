@@ -34,31 +34,44 @@ def import_module_from_path(module_path: str | Path, allow_relative_imports: boo
     if cached_module is not None and cached_path and Path(cached_path).resolve() == path:
         return cached_module
 
-    package_created = package_name not in sys.modules
-    if package_created:
+    package_prefix = f"{package_name}."
+    previous_modules = {
+        name for name in sys.modules
+        if name == package_name or name.startswith(package_prefix)
+    }
+    if package_name not in sys.modules:
         package = ModuleType(package_name)
         package.__path__ = [str(parent_dir)]
         package.__package__ = package_name
         package.__file__ = str(parent_dir / "__init__.py")
         sys.modules[package_name] = package
 
-    spec = importlib.util.spec_from_file_location(
-        qualified_name,
-        str(path)
-    )
-
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to create specification for module {module_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[qualified_name] = module
     try:
+        spec = importlib.util.spec_from_file_location(
+            qualified_name,
+            str(path)
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to create specification for module {module_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[qualified_name] = module
         spec.loader.exec_module(module)
         return module
     except Exception:
-        sys.modules.pop(qualified_name, None)
-        if package_created:
-            sys.modules.pop(package_name, None)
+        added_modules = [
+            name for name in sys.modules
+            if (name == package_name or name.startswith(package_prefix))
+            and name not in previous_modules
+        ]
+        # Remove children first, including their attributes on retained packages.
+        for name in sorted(added_modules, key=lambda name: name.count("."), reverse=True):
+            removed = sys.modules.pop(name, None)
+            parent_name, _, attribute = name.rpartition(".")
+            parent = sys.modules.get(parent_name)
+            if parent is not None and removed is not None:
+                if getattr(parent, attribute, None) is removed:
+                    delattr(parent, attribute)
         raise
 
 

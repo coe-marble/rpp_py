@@ -89,31 +89,46 @@ class ExternalComponentProcess:
                 self._executor.submit(self._connect_adapters()))
             self._started = True
         except Exception:
-            await self.stop()
+            try:
+                await self.stop()
+            except Exception as error:
+                self.logger.error(f"Component process startup rollback failed: {error!r}")
             raise
 
     async def stop(self) -> None:
+        errors = []
         if self._executor is not None:
             try:
                 await asyncio.wrap_future(
                     self._executor.submit(self._disconnect_adapters()))
-            finally:
+            except Exception as error:
+                errors.append(error)
+            try:
                 self._executor.stop()
                 self._executor = None
+            except Exception as error:
+                errors.append(error)
 
         if self._process is not None:
             try:
-                await asyncio.to_thread(self._process.wait, timeout=2)
-            except subprocess.TimeoutExpired:
-                self._process.terminate()
                 try:
                     await asyncio.to_thread(self._process.wait, timeout=2)
                 except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    await asyncio.to_thread(self._process.wait)
-            self._process = None
+                    self._process.terminate()
+                    try:
+                        await asyncio.to_thread(self._process.wait, timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self._process.kill()
+                        await asyncio.to_thread(self._process.wait)
+                self._process = None
+            except Exception as error:
+                errors.append(error)
 
         self._started = False
+        if errors:
+            for error in errors[1:]:
+                self.logger.error(f"Additional component process shutdown failure: {error!r}")
+            raise errors[0]
 
     async def _connect_adapters(self) -> None:
         self._runtime_client_context = RppRuntimeClientContext(
@@ -133,20 +148,36 @@ class ExternalComponentProcess:
         await self._runtime_client.connect(context=self._runtime_client_context)
 
     async def _disconnect_adapters(self) -> None:
+        errors = []
         if self._runtime_client is not None:
             try:
                 await self._runtime_client.shutdown()
-            except Exception:
-                pass
-            await self._runtime_client.disconnect()
-            self._runtime_client = None
+            except Exception as error:
+                self.logger.warn(f"Component runtime shutdown request failed: {error!r}")
+            try:
+                await self._runtime_client.disconnect()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                self._runtime_client = None
 
         for adapter_client, _ in reversed(self.components):
-            await adapter_client._disconnect_adapter_client_on_executor__()
+            try:
+                await adapter_client._disconnect_adapter_client_on_executor__()
+            except Exception as error:
+                errors.append(error)
 
         if self._runtime_client_context is not None:
-            await self._runtime_client_context.stop()
-            self._runtime_client_context = None
+            try:
+                await self._runtime_client_context.stop()
+            except Exception as error:
+                errors.append(error)
+            finally:
+                self._runtime_client_context = None
+        if errors:
+            for error in errors[1:]:
+                self.logger.error(f"Additional component disconnection failure: {error!r}")
+            raise errors[0]
 
     async def release(self) -> None:
         """Release one owner without stopping a shared process prematurely."""
