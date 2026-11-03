@@ -55,9 +55,9 @@ jobs:
         run: |
           export RPP_HOME="$PWD/.rpp"
           echo "RPP_HOME=$RPP_HOME" >> "$GITHUB_ENV"
-          rpp --rpp-home "$RPP_HOME" init-home
           source /opt/ros/lyrical/setup.bash
           colcon build --base-paths rpp_dev/src/rpp_cpp --symlink-install --cmake-args -DBUILD_TESTING=OFF -DPython3_EXECUTABLE=/opt/rpp-test-venv/bin/python
+          rpp --rpp-home "$RPP_HOME" init-home
           rpp --rpp-home "$RPP_HOME" registry config set RPP_CPP_CORE_PATH "$PWD/build/rpp_cpp"
       - name: Run tests
         run: python -m pytest rpp_dev/src/rpp_py/tests
