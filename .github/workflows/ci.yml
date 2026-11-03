@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: coe-marble/rpp_dev
-          ref: develop
+          ref: ${{ github.event.pull_request.base.ref || github.ref_name }}
           path: rpp_dev
           submodules: recursive
           token: ${{ secrets.RPP_CI_TOKEN || github.token }}
