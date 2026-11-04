@@ -1,7 +1,6 @@
 """Process ownership tests with mocked subprocesses and RPC clients."""
 
 import asyncio
-from concurrent.futures import Future
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
@@ -13,11 +12,6 @@ import rpp_py.external_component_process as processes
 
 @pytest.fixture
 def harness(monkeypatch):
-    async def to_thread(function, *args, **kwargs):
-        # All blocking process operations below are mocks.
-        return function(*args, **kwargs)
-
-    monkeypatch.setattr(processes.asyncio, "to_thread", to_thread)
     child = Mock()
     popen = Mock(return_value=child)
     monkeypatch.setattr(processes.subprocess, "Popen", popen)
@@ -32,20 +26,8 @@ def harness(monkeypatch):
         _disconnect_adapter_client_on_executor__=AsyncMock(),
     ) for _ in range(2)]
 
-    def submit(coroutine):
-        # Keep process tests on this loop; the executor has its own tests.
-        future = Future()
-
-        async def execute():
-            try:
-                future.set_result(await coroutine)
-            except Exception as error:
-                future.set_exception(error)
-
-        asyncio.get_running_loop().create_task(execute())
-        return future
-
-    executor = SimpleNamespace(start=Mock(), stop=Mock(), submit=submit)
+    executor = SimpleNamespace(start=Mock(), stop=Mock(),
+                               call=lambda coroutine: asyncio.run(coroutine))
     monkeypatch.setattr(processes, "ComponentCallExecutor", Mock(return_value=executor))
     process = processes.ExternalComponentProcess(
         components=[(adapter, processes.ExternalComponentSpec(
@@ -61,13 +43,13 @@ def harness(monkeypatch):
 
 
 def test_start_and_stop_are_idempotent(harness):
-    async def exercise():
-        await harness.process.start()
-        await harness.process.start()
-        await harness.process.stop()
-        await harness.process.stop()
+    def exercise():
+        harness.process.prepare()
+        harness.process.prepare()
+        harness.process.close()
+        harness.process.close()
 
-    asyncio.run(exercise())
+    exercise()
 
     harness.popen.assert_called_once_with(harness.process.command_args)
     harness.connection.start.assert_awaited_once_with(123)
@@ -91,11 +73,11 @@ def test_stop_escalates_to_terminate_then_kill(harness, timeouts):
         for _ in range(timeouts)
     ] + [0]
 
-    async def exercise():
-        await harness.process.start()
-        await harness.process.stop()
+    def exercise():
+        harness.process.prepare()
+        harness.process.close()
 
-    asyncio.run(exercise())
+    exercise()
 
     expected = [call.wait(timeout=2), call.terminate(), call.wait(timeout=2)]
     if timeouts == 2:
@@ -108,7 +90,7 @@ def test_connection_timeout_cleans_up_and_preserves_cause(harness):
     harness.connection.start.return_value = (False, failure)
 
     with pytest.raises(RuntimeError, match="Failed to connect") as caught:
-        asyncio.run(harness.process.start())
+        harness.process.prepare()
 
     assert caught.value.__cause__ is failure
     harness.runtime.connect.assert_not_awaited()
@@ -121,7 +103,7 @@ def test_adapter_connection_failure_cleans_up_partial_start(harness):
     harness.adapters[1]._connect_adapter_client_with_executor__.side_effect = failure
 
     with pytest.raises(ValueError) as caught:
-        asyncio.run(harness.process.start())
+        harness.process.prepare()
 
     assert caught.value is failure
     harness.adapters[0]._disconnect_adapter_client_on_executor__.assert_awaited_once()
@@ -135,7 +117,7 @@ def test_spawn_failure_propagates_without_attempting_rpc(harness):
     harness.popen.side_effect = failure
 
     with pytest.raises(FileNotFoundError) as caught:
-        asyncio.run(harness.process.start())
+        harness.process.prepare()
 
     assert caught.value is failure
     harness.connection.start.assert_not_awaited()
@@ -145,11 +127,11 @@ def test_spawn_failure_propagates_without_attempting_rpc(harness):
 def test_shutdown_rpc_failure_still_disconnects_and_reaps_process(harness):
     harness.runtime.shutdown.side_effect = ConnectionError("server already exited")
 
-    async def exercise():
-        await harness.process.start()
-        await harness.process.stop()
+    def exercise():
+        harness.process.prepare()
+        harness.process.close()
 
-    asyncio.run(exercise())
+    exercise()
 
     harness.runtime.disconnect.assert_awaited_once_with()
     harness.connection.stop.assert_awaited_once_with()
@@ -166,13 +148,13 @@ def test_disconnect_failure_still_releases_remaining_resources(harness, failure_
     }
     targets[failure_at].side_effect = failure
 
-    async def exercise():
-        await harness.process.start()
+    def exercise():
+        harness.process.prepare()
         with pytest.raises(ValueError) as caught:
-            await harness.process.stop()
+            harness.process.close()
         assert caught.value is failure
 
-    asyncio.run(exercise())
+    exercise()
 
     for adapter in harness.adapters:
         adapter._disconnect_adapter_client_on_executor__.assert_awaited_once()
@@ -192,17 +174,17 @@ def test_shared_process_stops_only_after_last_owner_releases(harness):
         rpp_home="/rpp/home",
     ) for index, adapter in enumerate(harness.adapters)]
 
-    async def exercise():
-        await handles[0].start()
-        await handles[1].start()
-        await handles[0].stop()
-        await handles[0].stop()
+    def exercise():
+        handles[0].prepare()
+        handles[1].prepare()
+        handles[0].close()
+        handles[0].close()
         harness.child.wait.assert_not_called()
         harness.runtime.shutdown.assert_not_awaited()
-        await handles[1].stop()
-        await handles[1].stop()
+        handles[1].close()
+        handles[1].close()
 
-    asyncio.run(exercise())
+    exercise()
 
     harness.popen.assert_called_once()
     for adapter in harness.adapters:
@@ -212,6 +194,59 @@ def test_shared_process_stops_only_after_last_owner_releases(harness):
     harness.child.wait.assert_called_once_with(timeout=2)
 
 
+def test_new_build_gets_its_own_host_without_closing_the_previous_owner(harness):
+    registry = processes.ExternalComponentProcessRegistry()
+    registry.register("cpp", lambda **kwargs: processes.ExternalComponentProcess(
+        command="component-server", port=12345, logger=Mock(), **kwargs), share_process=True)
+
+    def create(index):
+        return registry.create("cpp", adapter_client=harness.adapters[index],
+            component_path=f"/components/{index}", plugin_name=f"lib::Plugin{index}",
+            connection_name=f"connection{index}", rpp_home="/rpp/home")
+
+    first = create(0)
+    first.prepare()
+    registry.begin_build()
+    second = create(1)
+    second.prepare()
+    assert harness.popen.call_count == 2
+    second.close()
+    assert harness.child.wait.call_count == 1
+    first.close()
+    assert harness.child.wait.call_count == 2
+
+
+def test_unprepared_shared_reservation_is_released_after_partial_build(harness):
+    registry = processes.ExternalComponentProcessRegistry()
+    registry.register("cpp", lambda **kwargs: processes.ExternalComponentProcess(
+        command="component-server", port=12345, logger=Mock(), **kwargs), share_process=True)
+    handles = [registry.create("cpp", adapter_client=adapter,
+        component_path=f"/components/{index}", plugin_name=f"lib::Plugin{index}",
+        connection_name=f"connection{index}", rpp_home="/rpp/home")
+        for index, adapter in enumerate(harness.adapters)]
+    handles[0].prepare()
+    handles[1].close()
+    harness.child.wait.assert_not_called()
+    handles[0].close()
+    harness.child.wait.assert_called_once_with(timeout=2)
+
+
+def test_last_shared_owner_can_retry_failed_process_release(harness):
+    registry = processes.ExternalComponentProcessRegistry()
+    registry.register("cpp", lambda **kwargs: processes.ExternalComponentProcess(
+        command="component-server", port=12345, logger=Mock(), **kwargs), share_process=True)
+    handle = registry.create("cpp", adapter_client=harness.adapters[0],
+        component_path="/component", plugin_name="lib::Plugin", connection_name="connection",
+        rpp_home="/rpp/home")
+    handle.prepare()
+    harness.child.wait.side_effect = [OSError("wait failed"), 0]
+    with pytest.raises(OSError, match="wait failed"):
+        handle.close()
+    handle.close()
+    assert harness.child.wait.call_count == 2
+    harness.executor.stop.assert_called_once()
+
+
 def test_startup_error_survives_failed_rollback(harness):
     startup_failure = ValueError("adapter startup failed")
     harness.adapters[1]._connect_adapter_client_with_executor__.side_effect = startup_failure
@@ -219,7 +254,7 @@ def test_startup_error_survives_failed_rollback(harness):
         "adapter cleanup failed")
 
     with pytest.raises(ValueError) as caught:
-        asyncio.run(harness.process.start())
+        harness.process.prepare()
 
     assert caught.value is startup_failure
     harness.connection.stop.assert_awaited_once_with()
@@ -237,13 +272,13 @@ def test_multiple_cleanup_errors_preserve_first_and_log_the_rest(harness):
     harness.connection.stop.side_effect = RuntimeError("connection stop failed")
     harness.executor.stop.side_effect = RuntimeError("executor stop failed")
 
-    async def exercise():
-        await harness.process.start()
+    def exercise():
+        harness.process.prepare()
         with pytest.raises(ValueError) as caught:
-            await harness.process.stop()
+            harness.process.close()
         assert caught.value is failure
 
-    asyncio.run(exercise())
+    exercise()
 
     for adapter in harness.adapters:
         adapter._disconnect_adapter_client_on_executor__.assert_awaited_once()
@@ -260,13 +295,13 @@ def test_executor_stop_failure_still_reaps_process(harness):
     failure = RuntimeError("executor stop failed")
     harness.executor.stop.side_effect = failure
 
-    async def exercise():
-        await harness.process.start()
+    def exercise():
+        harness.process.prepare()
         with pytest.raises(RuntimeError) as caught:
-            await harness.process.stop()
+            harness.process.close()
         assert caught.value is failure
 
-    asyncio.run(exercise())
+    exercise()
 
     harness.connection.stop.assert_awaited_once_with()
     harness.child.wait.assert_called_once_with(timeout=2)
@@ -276,14 +311,14 @@ def test_process_wait_failure_can_be_retried_without_reconnecting(harness):
     failure = OSError("wait failed")
     harness.child.wait.side_effect = [failure, 0]
 
-    async def exercise():
-        await harness.process.start()
+    def exercise():
+        harness.process.prepare()
         with pytest.raises(OSError) as caught:
-            await harness.process.stop()
+            harness.process.close()
         assert caught.value is failure
-        await harness.process.stop()
+        harness.process.close()
 
-    asyncio.run(exercise())
+    exercise()
 
     assert harness.child.wait.call_args_list == [call(timeout=2), call(timeout=2)]
     harness.runtime.disconnect.assert_awaited_once_with()

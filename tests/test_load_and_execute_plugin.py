@@ -45,7 +45,7 @@ def mock_context_with_logger(logger: RppLogger | None = None) -> Mock:
 
 def create_initialized_plugin_instance(loader, plugin_name: str):
     instance = loader.create_instance(plugin_name)
-    instance.initialize(mock_context_with_logger())
+    instance.configure(mock_context_with_logger())
     return instance
 
 
@@ -548,11 +548,8 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
         component_context = context_builder.build_component_from_path(
             str(component_path))
 
-        lifecycle_executor = ComponentCallExecutor()
-        lifecycle_executor.start()
-        lifecycle_executor.call(component_context.start())
         try:
-            component_context.initialize()
+            component_context.configure()
             python_component = component_context.get_instance()
             message = python_component.Odometry2D()
 
@@ -565,5 +562,4 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
             message.pose.position.x = 11.0
             assert python_component.validate(message)
         finally:
-            lifecycle_executor.call(component_context.stop())
-            lifecycle_executor.stop()
+            component_context.close()

@@ -5,6 +5,8 @@ from rpp_common.component_slots import parse_component_slot_type
 from rpp_py.clock import clock_factory, Clock
 from rpp_py.logger import RppLogger
 from rpp_py.parameter_handler import Parameters
+from rpp_common.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.plugin import Plugin
 
 class ComponentContext:
 
@@ -40,57 +42,127 @@ class ComponentContext:
         self._clock = clock_factory(clock_options)
         self._logger = logger or RppLogger()
         self._runtime = runtime
+        self._runtime_closed = False
 
 
-    async def start(self):
-        started_subcontexts = []
+    def close(self):
+        """Release owned hosts; lifecycle cleanup is an explicit prior operation."""
+        errors = []
+        if self._runtime is not None and not self._runtime_closed:
+            try:
+                self._runtime.close()
+                self._runtime_closed = True
+            except Exception as error:
+                errors.append(error)
+        for children in reversed(list(self._subcomponents.values())):
+            if not isinstance(children, list):
+                children = [children]
+            for child in reversed(children):
+                try:
+                    child.close()
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            for error in errors[1:]:
+                self._logger.error(f"Additional component release failure: {error!r}")
+            raise errors[0]
+
+    def __del__(self):
+        # Explicit close reports errors and releases resources even with cycles.
+        runtime = getattr(self, "_runtime", None)
+        if runtime is not None and not getattr(self, "_runtime_closed", False):
+            try:
+                runtime.close()
+            except Exception:
+                pass
+
+
+    def configure(self) -> CallbackResult:
+        for subcontexts in self._subcomponents.values():
+            if not isinstance(subcontexts, list):
+                subcontexts = [subcontexts]
+            for subcontext in subcontexts:
+                subcontext.configure()
+        if self._runtime is None and self._instance is not None:
+            return Plugin.configure(self._instance, self)
+        return CallbackResult()
+
+    def cleanup(self) -> CallbackResult:
+        errors = []
+        if self._runtime is None and self._instance is not None:
+            try:
+                Plugin.cleanup(self._instance)
+            except Exception as error:
+                errors.append(error)
+        for subcontexts in reversed(list(self._subcomponents.values())):
+            if not isinstance(subcontexts, list):
+                subcontexts = [subcontexts]
+            for subcontext in reversed(subcontexts):
+                try:
+                    subcontext.cleanup()
+                except Exception as error:
+                    errors.append(error)
+        if errors:
+            for error in errors[1:]:
+                self._logger.error(f"Additional component cleanup failure: {error!r}")
+            raise errors[0]
+        return CallbackResult()
+
+    def activate(self, state=None) -> CallbackResult:
+        """Activate children cold, then activate this root with its handover state.
+
+        The manager owns transition validation and call gates. This traversal
+        rolls back only children whose activation completed successfully.
+        """
+        if self._runtime is not None:
+            raise LifecycleError("Adapted lifecycle activation is not supported yet")
+        if self._instance is not None:
+            Plugin._validate_state(self._instance, state)
+        elif state is not None:
+            raise TypeError("A context without a plugin accepts no state")
+        activated = []
         try:
             for subcontexts in self._subcomponents.values():
                 if not isinstance(subcontexts, list):
                     subcontexts = [subcontexts]
                 for subcontext in subcontexts:
-                    await subcontext.start()
-                    started_subcontexts.append(subcontext)
-            if self._runtime is not None:
-                await self._runtime.start()
+                    subcontext.activate()
+                    activated.append(subcontext)
+            if self._instance is not None:
+                return self._instance.activate_state(state)
+            return CallbackResult()
         except Exception:
-            for subcontext in reversed(started_subcontexts):
+            for subcontext in reversed(activated):
                 try:
-                    await subcontext.stop()
+                    subcontext.deactivate()
                 except Exception as error:
-                    self._logger.error(f"Component startup rollback failed: {error!r}")
+                    self._logger.error(f"Component activation rollback failed: {error!r}")
             raise
 
-
-    async def stop(self):
+    def deactivate(self) -> DeactivationResult:
+        """Stop parent before children; export root state only if all succeeded."""
         errors = []
-        contexts = []
-        if self._runtime is not None:
-            contexts.append(self._runtime)
+        result = DeactivationResult()
+        try:
+            if self._runtime is not None:
+                raise LifecycleError("Adapted lifecycle deactivation is not supported yet")
+            if self._instance is not None:
+                result = self._instance.deactivate_state()
+        except Exception as error:
+            errors.append(error)
         for subcontexts in reversed(list(self._subcomponents.values())):
             if not isinstance(subcontexts, list):
                 subcontexts = [subcontexts]
-            contexts.extend(reversed(subcontexts))
-        for context in contexts:
-            try:
-                await context.stop()
-            except Exception as error:
-                errors.append(error)
+            for subcontext in reversed(subcontexts):
+                try:
+                    subcontext.deactivate()
+                except Exception as error:
+                    errors.append(error)
         if errors:
             for error in errors[1:]:
-                self._logger.error(f"Additional component shutdown failure: {error!r}")
+                self._logger.error(f"Additional component deactivation failure: {error!r}")
             raise errors[0]
-
-
-    def initialize(self):
-        for subcontexts in self._subcomponents.values():
-            if not isinstance(subcontexts, list):
-                subcontexts = [subcontexts]
-            for subcontext in subcontexts:
-                if hasattr(subcontext, "initialize"):
-                    subcontext.initialize()
-        if self._runtime is None and hasattr(self._instance, "initialize"):
-            self._instance.initialize(self)
+        return result
 
 
     def get_clock(self) -> Clock:
