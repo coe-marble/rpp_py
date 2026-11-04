@@ -243,32 +243,18 @@ def test_builder_dispatches_component_by_source_language(
     assert result == expected
 
 
-def test_component_context_starts_and_stops_runtime():
-    events = []
-
-    class FakeRuntime:
-        async def start(self):
-            events.append("start")
-
-        async def stop(self):
-            events.append("stop")
-
-    context = ComponentContext(instance=object(), runtime=FakeRuntime())
-
-    asyncio.run(context.start())
-    asyncio.run(context.stop())
-
-    assert events == ["start", "stop"]
-
-
-def test_adapted_component_is_not_initialized_as_native():
+def test_adapted_component_is_not_configured_or_cleaned_as_native():
     class FakeInstance:
-        def initialize(self, _context):
-            raise AssertionError("Adapted instance must be initialized remotely")
+        def on_configure(self, _context):
+            raise AssertionError("Adapted instance must be configured remotely")
+
+        def on_cleanup(self):
+            raise AssertionError("Adapted instance must be cleaned remotely")
 
     context = ComponentContext(instance=FakeInstance(), runtime=object())
 
-    context.initialize()
+    assert context.configure().success
+    assert context.cleanup().success
 
 
 def test_external_component_process_builds_language_specific_command():

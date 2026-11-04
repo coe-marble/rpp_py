@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 import shutil
@@ -76,7 +75,7 @@ class ExternalComponentProcess:
             ])
         return args
 
-    async def start(self) -> None:
+    def prepare(self) -> None:
         if self._started:
             return
 
@@ -85,22 +84,20 @@ class ExternalComponentProcess:
             self._process = subprocess.Popen(self.command_args)
             self._executor = ComponentCallExecutor()
             self._executor.start()
-            await asyncio.wrap_future(
-                self._executor.submit(self._connect_adapters()))
+            self._executor.call(self._connect_adapters())
             self._started = True
         except Exception:
             try:
-                await self.stop()
+                self.close()
             except Exception as error:
                 self.logger.error(f"Component process startup rollback failed: {error!r}")
             raise
 
-    async def stop(self) -> None:
+    def close(self) -> None:
         errors = []
         if self._executor is not None:
             try:
-                await asyncio.wrap_future(
-                    self._executor.submit(self._disconnect_adapters()))
+                self._executor.call(self._disconnect_adapters())
             except Exception as error:
                 errors.append(error)
             try:
@@ -112,14 +109,14 @@ class ExternalComponentProcess:
         if self._process is not None:
             try:
                 try:
-                    await asyncio.to_thread(self._process.wait, timeout=2)
+                    self._process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     self._process.terminate()
                     try:
-                        await asyncio.to_thread(self._process.wait, timeout=2)
+                        self._process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         self._process.kill()
-                        await asyncio.to_thread(self._process.wait)
+                        self._process.wait()
                 self._process = None
             except Exception as error:
                 errors.append(error)
@@ -179,13 +176,13 @@ class ExternalComponentProcess:
                 self.logger.error(f"Additional component disconnection failure: {error!r}")
             raise errors[0]
 
-    async def release(self) -> None:
-        """Release one owner without stopping a shared process prematurely."""
+    def release(self) -> None:
+        """Retain the last owner if shutdown fails so close can be retried."""
         if self._active_handles == 0:
             return
+        if self._active_handles == 1:
+            self.close()
         self._active_handles -= 1
-        if self._active_handles == 0:
-            await self.stop()
 
 
 class CppExternalComponentProcess(ExternalComponentProcess):
@@ -227,19 +224,24 @@ class CppExternalComponentProcess(ExternalComponentProcess):
 class _SharedExternalComponentProcessHandle:
     def __init__(self, process: ExternalComponentProcess) -> None:
         self._process = process
-        self._started = False
+        self._closed = False
 
-    async def start(self) -> None:
-        if self._started:
-            return
-        await self._process.start()
-        self._started = True
+    def prepare(self) -> None:
+        if self._closed:
+            raise RuntimeError("Cannot prepare a released component process handle.")
+        self._process.prepare()
 
-    async def stop(self) -> None:
-        if not self._started:
+    def close(self) -> None:
+        if self._closed:
             return
-        self._started = False
-        await self._process.release()
+        self._process.release()
+        self._closed = True
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class ExternalComponentProcessRegistry:
@@ -248,6 +250,10 @@ class ExternalComponentProcessRegistry:
     def __init__(self) -> None:
         self._factories: dict[str, tuple[Callable[..., Any], bool]] = {}
         self._shared_processes: dict[str, ExternalComponentProcess] = {}
+
+    def begin_build(self) -> None:
+        """Group hosts within this build; existing handles retain their owners."""
+        self._shared_processes.clear()
 
     def register(
             self, language: str, factory: Callable[..., Any], *,

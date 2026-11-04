@@ -57,10 +57,9 @@ class ComponentContextBuilder:
     def build_component_from_path(
             self, component_path: str | Path) -> ComponentContext:
         """Build a context whose root is the component at ``component_path``."""
-        self._prepare_component_processes([
+        return self._build_prepared_contexts([
             self._make_component_node(component_path, component_path, "")
-        ])
-        return self._build_component_from_path(component_path)
+        ], lambda: self._build_component_from_path(component_path))
 
     def build_from_component_roots(
             self, roots: list[ComponentRoot]) -> list[ComponentContext]:
@@ -70,12 +69,28 @@ class ComponentContextBuilder:
                 root.path, root.path, root.plugin_name)
             for root in roots
         ]
-        self._prepare_component_processes(root_nodes)
-        return [
+        return self._build_prepared_contexts(root_nodes, lambda: [
             self._build_component_from_path(
                 root.path, root.parent_component_path, root.plugin_name)
             for root in root_nodes
-        ]
+        ])
+
+    def _build_prepared_contexts(self, roots, build):
+        try:
+            self._prepare_component_processes(roots)
+            for prepared in self._prepared_components.values():
+                prepared.process.prepare()
+            return build()
+        except BaseException:
+            for prepared in reversed(list(self._prepared_components.values())):
+                try:
+                    prepared.process.close()
+                except Exception as error:
+                    self.logger.error(f"Component build rollback failed: {error!r}")
+            raise
+        finally:
+            # Ownership transfers to returned contexts, not the reusable builder.
+            self._prepared_components.clear()
 
     def build_script_from_path(
             self, script_path: str | Path, *,
@@ -125,23 +140,25 @@ class ComponentContextBuilder:
                 roots.append(self._make_component_node(
                     component_path, component_path, component["PluginName"]
                 ))
-        self._prepare_component_processes(roots)
 
-        subcomponents = {}
-        for slot_name, assigned_components in components.items():
-            if not isinstance(assigned_components, list):
-                assigned_components = [assigned_components]
-            subcomponents[slot_name] = []
-            for component in assigned_components:
-                component_path = self.data_manager.get_component_path_in_parts_folder(
-                    parts_folder, component["PluginName"], component["Id"])
-                subcomponents[slot_name].append(
-                    self._build_component_from_path(component_path)
-                )
+        def build():
+            subcomponents = {}
+            for slot_name, assigned_components in components.items():
+                if not isinstance(assigned_components, list):
+                    assigned_components = [assigned_components]
+                subcomponents[slot_name] = []
+                for component in assigned_components:
+                    component_path = self.data_manager.get_component_path_in_parts_folder(
+                        parts_folder, component["PluginName"], component["Id"])
+                    subcomponents[slot_name].append(
+                        self._build_component_from_path(component_path)
+                    )
 
-        return ComponentContext(subcomponents=subcomponents, \
-                clock_options=self.clock_options, spec=script_description.spec,
-                logger=self.logger)
+            return ComponentContext(subcomponents=subcomponents, \
+                    clock_options=self.clock_options, spec=script_description.spec,
+                    logger=self.logger)
+
+        return self._build_prepared_contexts(roots, build)
 
     @staticmethod
     def _get_script_components(script_description, configuration=None):
@@ -270,6 +287,7 @@ class ComponentContextBuilder:
 
     def _prepare_component_processes(self, roots):
         self._prepared_components.clear()
+        self.external_component_process_registry.begin_build()
         groups: dict[str, list[ComponentContextBuilder._ComponentNode]] = {}
         for root in roots:
             for node in self._collect_component_nodes(root):

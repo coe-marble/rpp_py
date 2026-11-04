@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import sys
 
 from rpp_plugin_registrator.library_manager import LibraryManager
 from rpp_py.adapter_info import AdapterServerParams
@@ -31,9 +32,8 @@ async def _run(args):
             plugin_info = library_manager.get_plugin_info_from_lib(
                 plugin_name=plugin
             )
-            await context.start()
-            logger.debug(f"Context started: plugin={plugin!r}, connection={conn!r}")
-            context.initialize()
+            logger.debug(f"Context prepared: plugin={plugin!r}, connection={conn!r}")
+            context.configure()
 
             server_info = AdapterServerParams(
                 backend=context.get_instance(),
@@ -53,8 +53,21 @@ async def _run(args):
         await host.run_async()
     finally:
         logger.debug("Stopping contexts")
+        active_error = sys.exc_info()[1]
+        errors = []
         for context in reversed(contexts):
-            await context.stop()
+            try:
+                context.cleanup()
+            except Exception as error:
+                errors.append(error)
+                logger.error(f"Component cleanup failed: {error!r}")
+            try:
+                context.close()
+            except Exception as error:
+                errors.append(error)
+                logger.error(f"Component shutdown failed: {error!r}")
+        if errors and active_error is None:
+            raise errors[0]
 
 
 def main():
