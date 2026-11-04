@@ -40,7 +40,7 @@ inside the adapted runtime's executor. Plugin activation remains a separate
 lifecycle operation.
 
 Plugins configure resources in `on_configure(context)` and release them in
-`on_cleanup()`. Both callbacks return `rpp_common.lifecycle.CallbackResult`;
+`on_cleanup()`. Both callbacks return `rpp_py.lifecycle.CallbackResult`;
 the default implementations succeed without doing work. `context.configure()`
 configures children before their parent and raises `LifecycleError` on failure.
 `context.cleanup()` visits the parent before children in reverse order and
