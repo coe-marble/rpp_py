@@ -260,22 +260,23 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             "test_lib::ComponentPluginSimplePy")
         server_executor, server_runtime = self._start_adapter_server_sync(
             server, host, port)
-        client_connected = False
         try:
-            client.connect_adapter_client__(
-                RppRuntimeClientContext(host=host, port=port))
-            client_connected = True
-
             async def validate_messages():
-                assert not (await client.validate_async(
-                    self._odometry_message(interface, 1.0)))
-                assert await client.validate_async(
-                    self._odometry_message(interface, 6.0))
+                await client.connect_adapter_client_async(
+                    RppRuntimeClientContext(host=host, port=port))
+                try:
+                    assert client._component_call_executor is None
+                    assert not (await client.validate_async(
+                        self._odometry_message(interface, 1.0)))
+                    assert await client.validate_async(
+                        self._odometry_message(interface, 6.0))
+                    with pytest.raises(RuntimeError, match="validate_async"):
+                        client.validate(self._odometry_message(interface, 6.0))
+                finally:
+                    await client.disconnect_adapter_client_async()
 
             asyncio.run(validate_messages())
         finally:
-            if client_connected:
-                client.disconnect_adapter_client__()
             self._stop_adapter_server_sync(
                 server, server_runtime, server_executor)
 

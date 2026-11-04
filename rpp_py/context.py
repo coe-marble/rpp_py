@@ -5,7 +5,7 @@ from rpp_common.component_slots import parse_component_slot_type
 from rpp_py.clock import clock_factory, Clock
 from rpp_py.logger import RppLogger
 from rpp_py.parameter_handler import Parameters
-from rpp_common.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
 from rpp_py.plugin import Plugin
 
 class ComponentContext:
@@ -43,6 +43,7 @@ class ComponentContext:
         self._logger = logger or RppLogger()
         self._runtime = runtime
         self._runtime_closed = False
+        self._activation_outstanding = False
 
 
     def close(self):
@@ -66,6 +67,8 @@ class ComponentContext:
             for error in errors[1:]:
                 self._logger.error(f"Additional component release failure: {error!r}")
             raise errors[0]
+        self._instance = None
+        self._subcomponents.clear()
 
     def __del__(self):
         # Explicit close reports errors and releases resources even with cycles.
@@ -129,6 +132,7 @@ class ComponentContext:
                     subcontext.activate()
                     activated.append(subcontext)
             if self._instance is not None:
+                self._activation_outstanding = True
                 return self._instance.activate_state(state)
             return CallbackResult()
         except Exception:
@@ -146,8 +150,9 @@ class ComponentContext:
         try:
             if self._runtime is not None:
                 raise LifecycleError("Adapted lifecycle deactivation is not supported yet")
-            if self._instance is not None:
+            if self._instance is not None and self._activation_outstanding:
                 result = self._instance.deactivate_state()
+                self._activation_outstanding = False
         except Exception as error:
             errors.append(error)
         for subcontexts in reversed(list(self._subcomponents.values())):

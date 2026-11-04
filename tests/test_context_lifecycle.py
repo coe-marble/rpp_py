@@ -6,7 +6,7 @@ import pytest
 
 from rpp_py.context import ComponentContext
 from rpp_py.plugin import Plugin
-from rpp_common.lifecycle import CallbackResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError
 
 
 class RecordingPlugin(Plugin):
@@ -116,6 +116,8 @@ def test_nested_activation_failure_rolls_back_each_completed_subtree_once():
 def test_deactivation_continues_and_preserves_first_error():
     events = []
     context, plugins = activation_tree(events)
+    context.activate()
+    events.clear()
     plugins["parent"].deactivation_error = ValueError("parent rejected")
     plugins["second"].deactivation_error = ValueError("child rejected")
 
@@ -129,7 +131,7 @@ def test_deactivation_continues_and_preserves_first_error():
 
 def test_context_handover_is_root_only_and_discarded_if_a_child_cannot_stop():
     from dataclasses import dataclass, field
-    from rpp_common.lifecycle import DeactivationResult
+    from rpp_py.lifecycle import DeactivationResult
 
     @dataclass
     class Estimate:

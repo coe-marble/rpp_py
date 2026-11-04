@@ -1,7 +1,7 @@
 from __future__ import annotations
 from copy import deepcopy
 
-from rpp_common.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
 from rpp_common.parameter_description import ParameterDescription
 
 

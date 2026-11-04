@@ -16,10 +16,10 @@ class Estimate:
 
 
 def lifecycle_contract():
-    assert importlib.util.find_spec("rpp_common.lifecycle") is not None, (
+    assert importlib.util.find_spec("rpp_py.lifecycle") is not None, (
         "Lifecycle contract is not implemented yet; this is the test-first milestone"
     )
-    return importlib.import_module("rpp_common.lifecycle")
+    return importlib.import_module("rpp_py.lifecycle")
 
 
 def localizer_type(api):

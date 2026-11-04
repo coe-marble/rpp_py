@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from rpp_common.lifecycle import CallbackResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError
 from rpp_py.cli import component_server
 
 

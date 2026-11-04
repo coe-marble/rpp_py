@@ -1,6 +1,6 @@
 import pytest
 
-from rpp_common.lifecycle import CallbackResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError
 
 
 def test_require_success_accepts_successful_result():
