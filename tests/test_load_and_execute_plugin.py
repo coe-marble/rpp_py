@@ -62,10 +62,17 @@ def write_config(home: Path, orig_cfg: dict):
 class BaseTestLoadAndExecutePlugin:
     @staticmethod
     def source_ros_workspace(monkeypatch):
-        # get current path of the script
-        current_path = Path(__file__).parent.resolve()
-        rpp_source_path = current_path.parents[4] / "install" / "setup.bash"
-        env = subprocess.check_output(["bash", "-c", "source " + str(rpp_source_path) + " && env"], text=True)
+        # CI overlays this package into rpp_dev, while local runs normally
+        # start from the ROS workspace. Find the actual colcon workspace
+        # instead of relying on either checkout depth.
+        roots = (Path.cwd().resolve(), *Path(__file__).resolve().parents)
+        rpp_source_path = next((root / "install" / "setup.bash"
+                                for root in roots
+                                if (root / "install" / "setup.bash").is_file()), None)
+        if rpp_source_path is None:
+            raise RuntimeError("Could not find a colcon install/setup.bash for integration tests")
+        env = subprocess.check_output(
+            ["bash", "-c", "source \"$1\" && env", "--", str(rpp_source_path)], text=True)
         for line in env.splitlines():
             key, _, value = line.partition("=")
             if key:
