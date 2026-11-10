@@ -29,9 +29,10 @@ class CallbackResult:
     def failure(cls, message: str) -> "CallbackResult":
         return cls(success=False, message=message)
 
-    def require_success(self, operation: str) -> None:
+    def require_success(self, operation: str = "") -> None:
         if not self.success:
-            raise LifecycleError(f"{operation} failed: {self.message}")
+            message = self.message or "Operation failed"
+            raise LifecycleError(f"{operation} failed: {message}" if operation else message)
 
 
 @dataclass(frozen=True)
@@ -50,3 +51,9 @@ class ComponentInfo:
     last_result: CallbackResult
     callable: bool
     in_flight: int
+    instance_id: str = ""
+
+
+# The public name used by the C++ runtime.  Keep ComponentInfo as the Python
+# compatibility spelling while callers migrate to the shared terminology.
+ComponentStatus = ComponentInfo

@@ -6,8 +6,9 @@ from unittest.mock import Mock
 import pytest
 
 from rpp_py.context import ComponentContext
-from rpp_py.context_builder import ComponentContextBuilder
+from rpp_py.context_builder import ComponentRuntimeBuilder
 from rpp_py.parameter_handler import Parameters
+from rpp_py.runtime import ComponentRuntime
 
 
 @pytest.fixture
@@ -37,8 +38,11 @@ def build(monkeypatch):
                for name in ("first", "second")}
     registry = SimpleNamespace(begin_build=Mock(), create=Mock())
     manager = SimpleNamespace(lm=SimpleNamespace(rpp_home="/test"),
-        get_plugin_info_from_lib=lambda _: {"SourceLanguage": "cpp", "PluginName": "lib::Cpp"})
-    builder = ComponentContextBuilder(data_manager=manager,
+        get_plugin_info_from_lib=lambda _: {
+            "SourceLanguage": "cpp", "PluginName": "lib::Cpp",
+            "PluginType": "test::Plugin",
+        })
+    builder = ComponentRuntimeBuilder(data_manager=manager,
         external_component_process_registry=registry, logger=Mock())
     builder.resolve_component = lambda path, *_: records[path]
     builder._load_parameters = lambda *_: Parameters()
@@ -48,14 +52,14 @@ def build(monkeypatch):
     return SimpleNamespace(builder=builder, runtimes=runtimes, events=events)
 
 
-def test_builder_returns_prepared_context_and_transfers_ownership(build):
-    context = build.builder.build_component_from_path("first")
+def test_builder_returns_prepared_runtime_and_transfers_ownership(build):
+    runtime = build.builder.build_component_from_path("first")
     assert build.runtimes[0].ready
-    assert not hasattr(context, "start")
-    assert not hasattr(context, "stop")
+    assert not hasattr(runtime, "start")
+    assert not hasattr(runtime, "stop")
     assert build.builder._prepared_components == {}
-    context.close()
-    context.close()
+    runtime.close()
+    runtime.close()
     assert build.events == [("prepare", "first"), ("close", "first")]
 
 
@@ -93,32 +97,37 @@ def test_builder_reuse_does_not_close_an_existing_tree(build):
     assert all(runtime.closed for runtime in build.runtimes)
 
 
-def test_context_destruction_releases_its_owned_runtime(build):
-    context = build.builder.build_component_from_path("first")
-    del context
+def test_runtime_destruction_releases_its_owned_process(build):
+    runtime = build.builder.build_component_from_path("first")
+    del runtime
     assert build.runtimes[0].closed
 
 
-def test_context_close_continues_after_runtime_failure():
+def test_runtime_close_continues_after_child_runtime_failure():
+    from rpp_py.lifecycle import LifecycleError
     failed = Mock(close=Mock(side_effect=ValueError("release rejected")))
     sibling = Mock()
-    root = ComponentContext(subcomponents={"children": [
-        ComponentContext(runtime=sibling), ComponentContext(runtime=failed)]}, logger=Mock())
-    with pytest.raises(ValueError, match="release rejected"):
-        root.close()
+    root = ComponentContext._create(subcomponents={"children": [
+        ComponentContext._create(runtime=sibling), ComponentContext._create(runtime=failed)]}, logger=Mock())
+    with pytest.raises(LifecycleError, match="release rejected"):
+        ComponentRuntime(root).close()
     sibling.close.assert_called_once()
 
 
 def test_native_tree_lifecycle_needs_no_event_loop_or_executor(monkeypatch):
     from rpp_py.plugin import Plugin
+    from rpp_py.runtime import ComponentRuntime
     forbidden = Mock(side_effect=AssertionError("Native trees need no async machinery"))
     monkeypatch.setattr("asyncio.new_event_loop", forbidden)
     monkeypatch.setattr("rpp_py.component_call_executor.ComponentCallExecutor", forbidden)
     context = ComponentContext(instance=Plugin(), subcomponents={
         "child": ComponentContext(instance=Plugin())})
-    context.configure()
-    context.activate()
-    context.deactivate()
-    context.cleanup()
-    context.close()
+    runtime = ComponentRuntime(context)
+    runtime.configure()
+    context.activate_subcomponents()
+    runtime.activate()
+    runtime.deactivate()
+    context.deactivate_subcomponents()
+    runtime.cleanup()
+    runtime.close()
     forbidden.assert_not_called()

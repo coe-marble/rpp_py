@@ -11,14 +11,17 @@ from rpp_orchestrator.workspace import Workspace
 
 import rpp_plugin_registrator.registry_config as rp
 from rpp_py.clock import ClockOptions
-from rpp_py.context_builder import ComponentContextBuilder
+from rpp_py.build_requests import ComponentRequest
+from rpp_py.context_builder import ComponentRuntimeBuilder
 from rpp_py.data_manager import DataManager
 
 from rpp_py.component_call_executor import ComponentCallExecutor
+from rpp_py.component_manager import ComponentManager
 from rpp_py.rpp_runtime_client_context import RppRuntimeClientContext
-from rpp_py.plugin_runtime import PluginRuntimeClient, PluginRuntimeServer
+from rpp_py.plugin_runtime import HostedSlot, PluginRuntimeClient, PluginRuntimeServer
 from rpp_py.rpp_server_host import RppServerHost
 from rpp_py.context import ComponentContext
+from rpp_py.lifecycle import CallbackResult
 from rpp_py.logger import RppLogger
 from rpp_py.plugin_loader import (
     PluginAdapter, PythonPluginLoader
@@ -61,7 +64,7 @@ class BaseTestLoadAndExecutePlugin:
     def source_ros_workspace(monkeypatch):
         # get current path of the script
         current_path = Path(__file__).parent.resolve()
-        rpp_source_path = current_path.parent.parent.parent.parent / "install" / "setup.bash"
+        rpp_source_path = current_path.parents[4] / "install" / "setup.bash"
         env = subprocess.check_output(["bash", "-c", "source " + str(rpp_source_path) + " && env"], text=True)
         for line in env.splitlines():
             key, _, value = line.partition("=")
@@ -121,6 +124,36 @@ def native_rpp_runtime(request):
 
 @pytest.mark.usefixtures("native_rpp_runtime")
 class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
+
+    def test_native_python_lifecycle_and_method_call_happy_path(self):
+        """Native Python tree: explicit child and parent lifecycle, then method access."""
+        builder = ComponentRuntimeBuilder(
+            data_manager=DataManager(library_manager=self.library_manager),
+            clock_options=ClockOptions(), allow_dynamic_components=True)
+        runtime = builder.build_component(ComponentRequest(
+            EXAMPLES_DATA_PATH / "test_component_py", "test_lib::ComponentPluginComplexPy"))
+        context = runtime.get_context()
+        controller = context.get_subcomponent_context("ctl_main")
+
+        try:
+            assert runtime.configure().success
+            assert context.activate_subcomponents().success
+            assert runtime.activate().success
+
+            message = runtime.get_instance().Odometry2D()
+            message.pose.position.x = 6.0
+            # This fixture intentionally leaves validate_subcomponent disabled:
+            # the parent rejects while its native child accepts the same request.
+            assert not runtime.get_instance().validate(message)
+            assert context.get_subcomponent_instance("ctl_main").validate(message)
+            assert controller.deactivate().result.success
+            assert controller.activate().success
+
+            assert not runtime.get_instance().validate(message)
+        finally:
+            runtime.deactivate()
+            context.deactivate_subcomponents()
+            runtime.close().require_success("close native integration runtime")
 
 
 
@@ -291,8 +324,8 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             "test_lib::ComponentPluginSimplePy")
         loader = PythonPluginLoader(
             library_manager=self.library_manager, available_plugins=plugins)
-        server_backend = create_initialized_plugin_instance(
-            loader, "test_lib::ComponentPluginSimplePy")
+        server_backend = loader.create_instance("test_lib::ComponentPluginSimplePy")
+        server_context = ComponentContext(instance=server_backend)
         server_info = AdapterServerParams(
             plugin_name=plugin_info["PluginName"], backend=server_backend,
             name="test_server", connection_name="test_connection")
@@ -300,7 +333,11 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             library_manager=self.library_manager,
             plugin_info=plugin_info,
             server_info=server_info)
-        plugin_runtime_server = PluginRuntimeServer(adapters=[server])
+        manager = ComponentManager()
+        manager.adopt("test_connection", server_context, initial=True).require_success()
+        plugin_runtime_server = PluginRuntimeServer(
+            adapters=[server], slots={"test_connection": HostedSlot(
+                server, manager, lambda *_: CallbackResult.failure("no test loader"), CallbackResult)})
         plugin_runtime_client = PluginRuntimeClient()
         plugin_client = PluginAdapter.create_client(
             library_manager=self.library_manager,
@@ -329,12 +366,19 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
                 client_context, executor=client_executor)
             client_connected = True
 
+            result = client_executor.call(plugin_runtime_client.configure_component("test_connection"))
+            assert result.success, result.message
+            assert server_backend._context is server_context
+            missing = client_executor.call(plugin_runtime_client.configure_instance("missing"))
+            assert not missing.success
             plugin_msg = self._odometry_message(plugin_client, 1.0)
             assert not (plugin_client.validate(plugin_msg))
 
             client_executor.call(plugin_runtime_client.ping())
             adapters = client_executor.call(plugin_runtime_client.listAdapters())
             assert isinstance(adapters, list), "Expected a list of adapters."
+            result = client_executor.call(plugin_runtime_client.cleanup_component("test_connection"))
+            assert result.success, result.message
             client_executor.call(plugin_runtime_client.shutdown())
         finally:
             if client_connected:
@@ -353,7 +397,10 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         client, server, interface = self._create_local_network_adapter_pair(
             "test_lib::ComponentPluginSimplePy")
         server_host = RppServerHost(host=host_name, port=port)
-        server_host.add_server(server)
+        manager = ComponentManager()
+        manager.adopt("test_connection", ComponentContext(instance=server._backend),
+                      initial=True).require_success()
+        server_host.add_slot(server, manager, lambda *_: CallbackResult.failure("no test loader"))
         server_error = []
 
         def run_server_host():
@@ -395,13 +442,14 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
 
         component_path = EXAMPLES_DATA_PATH / "test_component_py"
         data_manager = DataManager(library_manager=self.library_manager)
-        context_builder = ComponentContextBuilder(
+        context_builder = ComponentRuntimeBuilder(
             data_manager=data_manager, clock_options=ClockOptions())
-        component_context = context_builder.build_component_from_path(
+        component_runtime = context_builder.build_component_from_path(
             str(component_path))
+        component_context = component_runtime.get_context()
 
         assert component_context is not None, "Component context should not be None."
-        assert hasattr(component_context, '_subcomponents'), "Component context should have subcomponents."
+        assert component_context.list_subcomponents() == ["ctl_main"]
         assert hasattr(component_context, '_clock'), "Component context should have clock options."
 
 
@@ -424,14 +472,16 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
         assert isinstance(res, TestClass), "param7 should be an instance of TestClass"
         assert res.a == 10, "param7.a should be 10"
         assert res.b == 20, "param7.b should be 20"
-        instance = component_context.get_instance()
+        instance = component_runtime.get_instance()
         assert instance is not None, "Instance should not be None."
 
-        component1 = component_context.get_component("ctl_main")
+        component1 = component_context.get_subcomponent_instance("ctl_main")
         assert component1 is not None, "Component 'ctl_main' should not be None."
 
         with pytest.raises(RuntimeError):
-            component_context.get_component("non_existing_component")
+            component_context.get_subcomponent_instance("non_existing_component")
+
+        component_runtime.close().require_success("close complex runtime")
 
 
 
@@ -504,7 +554,8 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
              "--host", host, "--port", str(port), \
              "--plugin", "test_lib::ComponentPluginSimpleCpp", '--home', str(self.rpp_handle.home), \
              "--path", str(component.folder),
-             "--conn", "test_connection"]
+             "--conn", "test_connection",
+             "--slot", "rpp_testing::MotionController2D"]
         server_p = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -541,17 +592,110 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
                     server_p.kill()
                     server_p.wait()
 
-    def test_component_py_with_cpp_subc(self):
-        component_path = EXAMPLES_DATA_PATH / "test_component_py_with_cpp_subc"
-        data_manager = DataManager(library_manager=self.library_manager)
-        context_builder = ComponentContextBuilder(
-            data_manager=data_manager, clock_options=ClockOptions())
-        component_context = context_builder.build_component_from_path(
-            str(component_path))
+    def test_cpp_hosted_slot_load_switch_reload_and_method_call_happy_path(self):
+        """The real C++ host exposes lifecycle and dynamic slot control over RPC."""
+        plugin_name = "test_lib::ComponentPluginSimpleCpp"
+        plugin_info = self.library_manager.get_plugin_info_from_lib(plugin_name)
+        first = self.ws.create_component("remote_first", plugin_name)
+        second = self.ws.create_component("remote_second", plugin_name)
+        connection_name = "remote_slot"
+        host, port = "localhost", self.get_free_port()
+        process = subprocess.Popen([
+            CppExternalComponentProcess.resolve_command(), "--host", host, "--port", str(port),
+            "--plugin", plugin_name, "--home", str(self.rpp_handle.home),
+            "--path", str(first.folder), "--conn", connection_name,
+            "--slot", "rpp_testing::MotionController2D",
+            "--allow-dynamic-components",
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        executor = ComponentCallExecutor()
+        executor.start()
+        context = RppRuntimeClientContext(host=host, port=port)
+        runtime_client = PluginRuntimeClient()
+        adapter = None
+
+        def connect_adapter():
+            client = PluginAdapter.create_client(
+                library_manager=self.library_manager, plugin_info=plugin_info,
+                client_info=AdapterClientParams(plugin_name=plugin_name, name="remote_client",
+                                                 connection_name=connection_name))
+            client.connect_adapter_client__(context, executor=executor)
+            return client
 
         try:
-            component_context.configure()
-            python_component = component_context.get_instance()
+            connected, error = executor.call(context.start(5000))
+            assert connected, error
+            executor.call(runtime_client.connect(context))
+            adapter = connect_adapter()
+
+            statuses = executor.call(runtime_client.list_components(connection_name))
+            assert len(statuses) == 1
+            first_id = str(statuses[0].instanceId)
+            assert executor.call(runtime_client.configure_instance(first_id)).success
+            assert executor.call(runtime_client.activate_instance(first_id, adapter=adapter)).success
+            message = self._odometry_message(adapter, 6.0)
+            assert adapter.validate(message)
+            stopped = executor.call(runtime_client.deactivate_instance(first_id, adapter=adapter))
+            assert stopped.result.success
+            assert executor.call(runtime_client.activate_instance(
+                first_id, stopped.state, adapter=adapter)).success
+
+            assert executor.call(runtime_client.load_component(
+                str(second.folder), plugin_name, connection_name)).success
+            statuses = executor.call(runtime_client.list_components(connection_name))
+            second_id = next(str(status.instanceId) for status in statuses
+                             if str(status.name) == "remote_second")
+            assert executor.call(runtime_client.configure_instance(second_id)).success
+            assert executor.call(runtime_client.switch_components(
+                connection_name, first_id, second_id, transfer_state=True)).success
+
+            adapter.disconnect_adapter_client__()
+            adapter = connect_adapter()
+            assert adapter.validate(message)
+            assert executor.call(runtime_client.unload_instance(first_id)).success
+            assert executor.call(runtime_client.reload_instance(
+                second_id, transfer_state=True)).success
+            statuses = executor.call(runtime_client.list_components(connection_name))
+            reloaded_id = next(str(status.instanceId) for status in statuses
+                               if str(status.name) == "remote_second")
+            assert reloaded_id != second_id
+
+            adapter.disconnect_adapter_client__()
+            adapter = connect_adapter()
+            assert adapter.validate(message)
+            assert executor.call(runtime_client.deactivate_instance(
+                reloaded_id, adapter=adapter)).result.success
+            assert executor.call(runtime_client.cleanup_instance(reloaded_id)).success
+            executor.call(runtime_client.shutdown())
+        finally:
+            if adapter is not None:
+                adapter.disconnect_adapter_client__()
+            executor.call(runtime_client.disconnect())
+            executor.call(context.stop())
+            executor.stop()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+    def test_python_to_cpp_remote_lifecycle_and_method_call_happy_path(self):
+        """Python parent controls its C++ child through the actual RPC host."""
+        component_path = EXAMPLES_DATA_PATH / "test_component_py_with_cpp_subc"
+        data_manager = DataManager(library_manager=self.library_manager)
+        runtime_builder = ComponentRuntimeBuilder(
+            data_manager=data_manager, clock_options=ClockOptions())
+        runtime = runtime_builder.build_component_from_path(
+            str(component_path))
+        context = runtime.get_context()
+        remote_child = context.get_subcomponent_context("ctl_main")
+
+        try:
+            assert runtime.configure().success
+            assert runtime.activate().success
+            assert remote_child.activate().success
+            python_component = runtime.get_instance()
             message = python_component.Odometry2D()
 
             message.pose.position.x = 1.0
@@ -562,5 +706,14 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
 
             message.pose.position.x = 11.0
             assert python_component.validate(message)
+            stopped = remote_child.deactivate()
+            assert stopped.result.success
+            assert remote_child.activate(stopped.state).success
+            message.pose.position.x = 6.0
+            assert not python_component.validate(message)
+            message.pose.position.x = 11.0
+            assert python_component.validate(message)
         finally:
-            component_context.close()
+            runtime.deactivate()
+            remote_child.deactivate()
+            runtime.close().require_success("close remote integration runtime")

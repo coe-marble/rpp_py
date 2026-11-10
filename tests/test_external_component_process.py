@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 import rpp_py.external_component_process as processes
+from rpp_py.lifecycle import CallbackResult
 
 
 @pytest.fixture
@@ -18,7 +19,9 @@ def harness(monkeypatch):
     connection = SimpleNamespace(
         start=AsyncMock(return_value=(True, None)), stop=AsyncMock())
     runtime = SimpleNamespace(
-        connect=AsyncMock(), shutdown=AsyncMock(), disconnect=AsyncMock())
+        connect=AsyncMock(), shutdown=AsyncMock(), disconnect=AsyncMock(),
+        configure_component=AsyncMock(return_value=CallbackResult()),
+        cleanup_component=AsyncMock(return_value=CallbackResult()))
     monkeypatch.setattr(processes, "RppRuntimeClientContext", Mock(return_value=connection))
     monkeypatch.setattr(processes, "PluginRuntimeClient", Mock(return_value=runtime))
     adapters = [SimpleNamespace(
@@ -177,6 +180,9 @@ def test_shared_process_stops_only_after_last_owner_releases(harness):
     def exercise():
         handles[0].prepare()
         handles[1].prepare()
+        assert handles[0].configure().success
+        assert handles[1].configure().success
+        assert handles[0].cleanup().success
         handles[0].close()
         handles[0].close()
         harness.child.wait.assert_not_called()
@@ -191,6 +197,8 @@ def test_shared_process_stops_only_after_last_owner_releases(harness):
         adapter._connect_adapter_client_with_executor__.assert_awaited_once()
         adapter._disconnect_adapter_client_on_executor__.assert_awaited_once()
     harness.runtime.shutdown.assert_awaited_once_with()
+    assert harness.runtime.configure_component.await_args_list == [call("connection0"), call("connection1")]
+    harness.runtime.cleanup_component.assert_awaited_once_with("connection0")
     harness.child.wait.assert_called_once_with(timeout=2)
 
 

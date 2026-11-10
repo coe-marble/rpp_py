@@ -2,6 +2,7 @@ from rpp_plugin_registrator.registry_config import get_app_registry_path
 from rpp_plugin_registrator.plugin_descriptors.capnp import load_capnp_schema_from_file
 
 _PLUGIN_CAPNP_REGISTRY = {}
+_STRUCT_CAPNP_REGISTRY = {}
 
 
 def _capnp_file_path(plugin_name: str, file_name: str):
@@ -47,4 +48,21 @@ def get_server_class(plugin_name: str, file_name: str):
     return _register_capnp_plugin(plugin_name, file_name).Server
 
 
-__all__ = ["get_client_class", "get_server_class"]
+def get_struct_class(library_name: str, struct_name: str):
+    """Load a registered data struct by its stable library/type identity."""
+    key = (library_name, struct_name)
+    if key in _STRUCT_CAPNP_REGISTRY:
+        return _STRUCT_CAPNP_REGISTRY[key][1]
+    directory = get_app_registry_path() / "capnp" / library_name
+    for path in directory.glob("*.capnp"):
+        parser, loaded = load_capnp_schema_from_file(
+            path, relative_to_source=False, with_random_schema_id=False,
+            use_global_parser=False)
+        struct = getattr(loaded, struct_name, None)
+        if struct is not None:
+            _STRUCT_CAPNP_REGISTRY[key] = (parser, struct)
+            return struct
+    raise ValueError(f"Struct '{library_name}::{struct_name}' is not registered")
+
+
+__all__ = ["get_client_class", "get_server_class", "get_struct_class"]

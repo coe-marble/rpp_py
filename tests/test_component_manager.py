@@ -1,4 +1,4 @@
-"""Public managed lifecycle, ownership, and call-gate contracts."""
+"""Internal slot-manager lifecycle, ownership, and call-gate contracts."""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -10,7 +10,7 @@ import pytest
 from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError, LifecycleState
 from rpp_py.context import ComponentContext
 from rpp_py.plugin import Plugin
-from rpp_py.plugin_manager import PluginManager
+from rpp_py.component_manager import ComponentManager
 
 
 @dataclass
@@ -57,7 +57,7 @@ def setup_manager():
         return ComponentContext(instance=plugin)
 
     builder = Mock(build_component_from_path=Mock(side_effect=build))
-    manager = PluginManager(builder=builder)
+    manager = ComponentManager(factory=builder.build_component_from_path, allow_dynamic_components=True)
     yield manager, plugins, events, builder
     manager.close()
 
@@ -68,10 +68,27 @@ def ready(manager, name="localizer"):
     assert manager.activate(name).success
 
 
+def test_failed_load_cleanup_preserves_error_and_allows_unload_retry(setup_manager):
+    manager, _, _, builder = setup_manager
+    builder.build_component_from_path.side_effect = RuntimeError("load rejected")
+    assert not manager.load("localizer", "/workspace/localizer").success
+    result = manager.cleanup("localizer")
+    assert not result.success
+    assert "No loaded context" in result.message
+    assert manager.get_state("localizer") is LifecycleState.ERROR
+    assert manager.get_info("localizer").transition is None
+    assert manager.unload("localizer").success
+    builder.build_component_from_path.side_effect = lambda _: ComponentContext(instance=Localizer([]))
+    assert manager.load("localizer").success
+    assert manager.configure("localizer").success
+
+
 def test_normal_flow_duplicate_activation_and_generation(setup_manager):
     manager, _, events, builder = setup_manager
     ready(manager)
-    generation = manager.get_info("localizer").generation
+    initial_info = manager.get_info("localizer")
+    generation = initial_info.generation
+    instance_id = initial_info.instance_id
     assert manager.activate("localizer").success
     assert events == ["configure", "activate"]
     assert manager.with_active("localizer", lambda plugin: plugin.estimate.position) == [1.0]
@@ -82,8 +99,9 @@ def test_normal_flow_duplicate_activation_and_generation(setup_manager):
     assert manager.get_state("localizer") is LifecycleState.UNLOADED
     ready(manager)
     assert manager.get_info("localizer").generation > generation
-    with pytest.raises(LifecycleError, match="generation"):
-        manager.with_active("localizer", lambda plugin: None, generation=generation)
+    with pytest.raises(LifecycleError, match="instance ID"):
+        manager.with_active("localizer", lambda plugin: None,
+                            expected_instance_id=instance_id)
     assert builder.build_component_from_path.call_count == 2
 
 
@@ -199,11 +217,11 @@ def test_switch_copies_handover_and_failed_target_keeps_source_inactive(setup_ma
     manager, plugins, _, _ = setup_manager
     ready(manager, "ekf")
     assert manager.load("particle", component="/workspace/particle").success
-    assert manager.switch_plugins("ekf", "particle", transfer_state=True).success
+    assert manager.switch_components("ekf", "particle", transfer_state=True).success
     plugins[0].estimate.position.append(99.0)
     assert manager.with_active("particle", lambda plugin: plugin.estimate.position) == [1.0]
     plugins[0].reject = "activate"
-    assert not manager.switch_plugins("particle", "ekf", transfer_state=True).success
+    assert not manager.switch_components("particle", "ekf", transfer_state=True).success
     assert manager.get_state("particle") is LifecycleState.INACTIVE
     assert manager.get_state("ekf") is LifecycleState.ERROR
 

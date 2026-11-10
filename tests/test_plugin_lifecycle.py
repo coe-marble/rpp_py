@@ -136,6 +136,7 @@ def test_wrong_export_type_is_rejected():
 def test_configure_visits_children_before_parent():
     api = lifecycle_contract()
     from rpp_py.context import ComponentContext
+    from rpp_py.runtime import ComponentRuntime
 
     events = []
 
@@ -147,11 +148,11 @@ def test_configure_visits_children_before_parent():
             events.append(self.name)
             return api.CallbackResult()
 
-    child = ComponentContext(instance=Recorder("child"), logger=Mock())
-    parent = ComponentContext(instance=Recorder("parent"),
+    child = ComponentContext._create(instance=Recorder("child"), logger=Mock())
+    parent = ComponentContext._create(instance=Recorder("parent"),
                               subcomponents={"children": [child]}, logger=Mock())
 
-    assert parent.configure().success
+    assert ComponentRuntime(parent).configure().success
     assert events == ["child", "parent"]
 
 
@@ -159,9 +160,10 @@ def test_configure_visits_children_before_parent():
 def test_configure_rejects_missing_or_failed_callback_result(kind):
     api = lifecycle_contract()
     from rpp_py.context import ComponentContext
+    from rpp_py.runtime import ComponentRuntime
 
     result = None if kind == "missing-result" else api.CallbackResult.failure("rejected")
     plugin = Mock(on_configure=Mock(return_value=result))
-    context = ComponentContext(instance=plugin, logger=Mock())
+    context = ComponentContext._create(instance=plugin, logger=Mock())
     with pytest.raises(api.LifecycleError):
-        context.configure()
+        ComponentRuntime(context).configure()

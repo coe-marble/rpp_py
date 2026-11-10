@@ -3,11 +3,11 @@ import asyncio
 import sys
 
 from rpp_plugin_registrator.library_manager import LibraryManager
-from rpp_py.adapter_info import AdapterServerParams
-from rpp_py.context_builder import ComponentContextBuilder
+from rpp_py.build_requests import (
+    ComponentRequest, ComponentServerRequest, ComponentServerSlotRequest,
+)
+from rpp_py.context_builder import ComponentRuntimeBuilder
 from rpp_py.data_manager import DataManager
-from rpp_py.plugin_loader import PluginAdapter
-from rpp_py.rpp_server_host import RppServerHost
 from rpp_py.logger import RppLogger, LoggerOptions
 
 
@@ -17,52 +17,40 @@ async def _run(args):
                 f"home={args.home!r}, components={len(args.path)}")
     library_manager = LibraryManager(rpp_home=args.home)
     data_manager = DataManager(library_manager=library_manager)
-    context_builder = ComponentContextBuilder(data_manager=data_manager, logger=logger)
-    host = RppServerHost(host=args.host, port=args.port, logger=logger)
-    contexts = []
+    runtime_builder = ComponentRuntimeBuilder(data_manager=data_manager, logger=logger,
+        allow_dynamic_components=getattr(args, "allow_dynamic_components", False))
+    host = None
 
     try:
-        roots = [
-            ComponentContextBuilder.ComponentRoot(path, plugin)
-            for path, plugin in zip(args.path, args.plugin)
-        ]
+        slots = {}
+        for path, plugin, connection in zip(args.path, args.plugin, args.conn):
+            slots.setdefault(connection, []).append(ComponentRequest(path, plugin))
         logger.debug(f"Building roots: {list(zip(args.path, args.plugin))!r}")
-        contexts = context_builder.build_from_component_roots(roots)
-        for context, conn, plugin in zip(contexts, args.conn, args.plugin):
-            plugin_info = library_manager.get_plugin_info_from_lib(
-                plugin_name=plugin
-            )
-            logger.debug(f"Context prepared: plugin={plugin!r}, connection={conn!r}")
-            context.configure()
-
-            server_info = AdapterServerParams(
-                backend=context.get_instance(),
-                plugin_name=plugin_info["PluginName"],
-                name=f"{conn}_server",
-                connection_name=conn,
-            )
-            server = PluginAdapter.create_server(
-                library_manager=library_manager,
-                plugin_info=plugin_info,
-                server_info=server_info,
-                logger=logger,
-            )
-            host.add_server(server)
-            logger.debug(f"Adapter registered: plugin={plugin!r}, connection={conn!r}")
+        slot_requests = []
+        for connection, components in slots.items():
+            plugin_types = {
+                library_manager.get_plugin_info_from_lib(component.plugin_name)["PluginType"]
+                for component in components
+            }
+            if len(plugin_types) != 1:
+                raise ValueError(
+                    f"Hosted slot {connection!r} contains incompatible plugin types")
+            slot_requests.append(ComponentServerSlotRequest(
+                connection_name=connection, declaration=f"List[{plugin_types.pop()}]",
+                components=tuple(components)))
+        request = ComponentServerRequest(
+            host=args.host, port=args.port,
+            slots=tuple(slot_requests))
+        host = runtime_builder.build_component_server(request)
 
         await host.run_async()
     finally:
-        logger.debug("Stopping contexts")
+        logger.debug("Stopping component runtimes")
         active_error = sys.exc_info()[1]
         errors = []
-        for context in reversed(contexts):
+        if host is not None:
             try:
-                context.cleanup()
-            except Exception as error:
-                errors.append(error)
-                logger.error(f"Component cleanup failed: {error!r}")
-            try:
-                context.close()
+                host.close()
             except Exception as error:
                 errors.append(error)
                 logger.error(f"Component shutdown failed: {error!r}")
@@ -87,6 +75,7 @@ def main():
             action='append', required=True)
     argument_parser.add_argument('--plugin',
             action='append', required=True)
+    argument_parser.add_argument('--allow-dynamic-components', action='store_true')
     args = argument_parser.parse_args()
 
     if len(args.conn) == 0 or len(args.plugin) == 0 or len(args.path) == 0:

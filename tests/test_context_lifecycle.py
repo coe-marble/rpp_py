@@ -1,22 +1,25 @@
-"""Component lifecycle tests without plugins, servers, or generated schemas."""
+"""Context access and runtime-owned lifecycle behavior."""
 
+from dataclasses import dataclass, field
 from unittest.mock import Mock
 
 import pytest
 
 from rpp_py.context import ComponentContext
+from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
 from rpp_py.plugin import Plugin
-from rpp_py.lifecycle import CallbackResult, LifecycleError
+from rpp_py.runtime import ComponentRuntime
 
 
 class RecordingPlugin(Plugin):
-    def __init__(self, name, events, configure_error=None, cleanup_error=None):
+    def __init__(self, name, events, *, configure_error=None, cleanup_error=None,
+                 activation_error=None, deactivation_error=None):
         self.name = name
         self.events = events
         self.configure_error = configure_error
         self.cleanup_error = cleanup_error
-        self.activation_error = None
-        self.deactivation_error = None
+        self.activation_error = activation_error
+        self.deactivation_error = deactivation_error
 
     def on_configure(self, context):
         self.events.append(("configure", self.name))
@@ -44,95 +47,55 @@ class RecordingPlugin(Plugin):
         return CallbackResult()
 
 
-def activation_tree(events):
-    plugins = {name: RecordingPlugin(name, events)
-               for name in ("parent", "first", "second", "unreached")}
-    children = [ComponentContext(instance=plugins[name])
-                for name in ("first", "second", "unreached")]
-    context = ComponentContext(instance=plugins["parent"],
-                               subcomponents={"children": children}, logger=Mock())
-    return context, plugins
+def tree(events):
+    children = [ComponentContext._create(instance=RecordingPlugin(name, events), component_name=name)
+                for name in ("first", "second")]
+    context = ComponentContext._create(
+        instance=RecordingPlugin("parent", events),
+        subcomponents={"children": children}, logger=Mock())
+    return ComponentRuntime(context), context
 
 
-def test_activation_children_first_and_deactivation_parent_first():
+def test_runtime_configures_children_before_parent():
     events = []
-    context, _ = activation_tree(events)
-    assert context.activate().success
-    assert context.deactivate().result.success
-    assert events == [("activate", "first"), ("activate", "second"),
-                      ("activate", "unreached"), ("activate", "parent"),
-                      ("deactivate", "parent"), ("deactivate", "unreached"),
-                      ("deactivate", "second"), ("deactivate", "first")]
+    runtime, _ = tree(events)
+
+    assert runtime.configure().success
+    assert events == [("configure", "first"), ("configure", "second"),
+                      ("configure", "parent")]
 
 
-@pytest.mark.parametrize("failed", ["second", "parent"])
-def test_failed_activation_rolls_back_only_completed_children(failed):
+def test_runtime_does_not_implicitly_activate_or_deactivate_subcomponents():
     events = []
-    context, plugins = activation_tree(events)
-    plugins[failed].activation_error = ValueError("activation rejected")
-
-    with pytest.raises(LifecycleError, match="activation rejected"):
-        context.activate()
-
-    activated = ["first"] if failed == "second" else ["first", "second", "unreached"]
-    assert events == ([("activate", name) for name in activated + [failed]] +
-                      [("deactivate", name) for name in reversed(activated)])
-
-
-def test_activation_rollback_continues_and_preserves_original_error():
-    events = []
-    context, plugins = activation_tree(events)
-    plugins["parent"].activation_error = ValueError("activation rejected")
-    plugins["second"].deactivation_error = ValueError("rollback rejected")
-
-    with pytest.raises(LifecycleError, match="activation rejected"):
-        context.activate()
-
-    assert events[-3:] == [("deactivate", "unreached"), ("deactivate", "second"),
-                           ("deactivate", "first")]
-    assert "rollback rejected" in context.get_logger().error.call_args.args[0]
-
-
-def test_nested_activation_failure_rolls_back_each_completed_subtree_once():
-    events = []
-    first = ComponentContext(instance=RecordingPlugin("first", events), subcomponents={
-        "nested": ComponentContext(instance=RecordingPlugin("first nested", events))})
-    failed = RecordingPlugin("failed", events)
-    failed.activation_error = ValueError("activation rejected")
-    second = ComponentContext(instance=failed, subcomponents={
-        "nested": ComponentContext(instance=RecordingPlugin("second nested", events))})
-    parent = ComponentContext(instance=RecordingPlugin("parent", events),
-                              subcomponents={"children": [first, second]})
-
-    with pytest.raises(LifecycleError, match="activation rejected"):
-        parent.activate()
-
-    assert events == [("activate", "first nested"), ("activate", "first"),
-                      ("activate", "second nested"), ("activate", "failed"),
-                      ("deactivate", "second nested"), ("deactivate", "first"),
-                      ("deactivate", "first nested")]
-
-
-def test_deactivation_continues_and_preserves_first_error():
-    events = []
-    context, plugins = activation_tree(events)
-    context.activate()
+    runtime, context = tree(events)
+    runtime.configure().require_success()
     events.clear()
-    plugins["parent"].deactivation_error = ValueError("parent rejected")
-    plugins["second"].deactivation_error = ValueError("child rejected")
+
+    assert runtime.activate().success
+    assert events == [("activate", "parent")]
+    assert context.activate_subcomponents().success
+    assert events == [("activate", "parent"), ("activate", "first"),
+                      ("activate", "second")]
+
+    assert runtime.deactivate().result.success
+    assert context.deactivate_subcomponents().success
+    assert events[-3:] == [("deactivate", "parent"), ("deactivate", "second"),
+                           ("deactivate", "first")]
+
+
+def test_failed_parent_activation_does_not_activate_subcomponents():
+    events = []
+    runtime, context = tree(events)
+    runtime.configure().require_success()
+    runtime.get_instance().activation_error = ValueError("parent rejected")
 
     with pytest.raises(LifecycleError, match="parent rejected"):
-        context.deactivate()
-
-    assert events == [("deactivate", "parent"), ("deactivate", "unreached"),
-                      ("deactivate", "second"), ("deactivate", "first")]
-    assert "child rejected" in context.get_logger().error.call_args.args[0]
+        runtime.activate()
+    assert not context.get_subcomponent_context("children", "first").is_active()
+    assert not context.get_subcomponent_context("children", "second").is_active()
 
 
-def test_context_handover_is_root_only_and_discarded_if_a_child_cannot_stop():
-    from dataclasses import dataclass, field
-    from rpp_py.lifecycle import DeactivationResult
-
+def test_runtime_exports_only_its_own_handover_state():
     @dataclass
     class Estimate:
         position: list[float] = field(default_factory=list)
@@ -140,106 +103,80 @@ def test_context_handover_is_root_only_and_discarded_if_a_child_cannot_stop():
     class Stateful(Plugin):
         HANDOVER_STATE_TYPE = Estimate
 
+        def on_configure(self, context):
+            return CallbackResult()
+
         def on_activate(self, state=None):
-            self.estimate = state
+            self.estimate = state or Estimate()
             return CallbackResult()
 
         def on_deactivate(self):
             return DeactivationResult(state=self.estimate)
 
-    child_plugin = RecordingPlugin("child", [])
-    plugin = Stateful()
-    context = ComponentContext(instance=plugin, subcomponents={
-        "child": ComponentContext(instance=child_plugin)})
-    state = Estimate([1.0])
-    assert context.activate(state).success
-    state.position.append(2.0)
-    snapshot = context.deactivate().state
-    plugin.estimate.position.append(3.0)
-    assert snapshot.position == [1.0]
-
-    assert context.activate(snapshot).success
-    child_plugin.deactivation_error = ValueError("child is still active")
-    with pytest.raises(LifecycleError, match="child is still active"):
-        context.deactivate()
+    runtime = ComponentRuntime(ComponentContext(instance=Stateful()))
+    runtime.configure().require_success()
+    assert runtime.activate(Estimate([1.0])).success
+    stopped = runtime.deactivate()
+    assert stopped.result.success
+    assert stopped.state.position == [1.0]
 
 
-def test_incompatible_root_state_does_not_activate_children():
-    events = []
-    context, _ = activation_tree(events)
-    with pytest.raises(TypeError, match="no state"):
-        context.activate({"unexpected": "state"})
-    assert events == []
+def test_adapted_context_forwards_lifecycle_through_runtime():
+    external = Mock(
+        configure=Mock(return_value=CallbackResult()),
+        activate=Mock(return_value=CallbackResult()),
+        deactivate=Mock(return_value=DeactivationResult()),
+        cleanup=Mock(return_value=CallbackResult()))
+    plugin = Plugin()
+    plugin.on_configure = Mock()
+    runtime = ComponentRuntime(ComponentContext._create(instance=plugin, runtime=external))
+
+    assert runtime.configure().success
+    assert runtime.activate().success
+    assert runtime.deactivate().result.success
+    assert runtime.cleanup().success
+    external.configure.assert_called_once_with()
+    external.activate.assert_called_once_with(None)
+    external.deactivate.assert_called_once_with()
+    external.cleanup.assert_called_once_with()
+    plugin.on_configure.assert_not_called()
 
 
-def test_adapted_activation_is_rejected_until_runtime_control_exists():
-    context = ComponentContext(instance=Plugin(), runtime=object())
-    with pytest.raises(LifecycleError, match="Adapted.*not supported"):
-        context.activate()
-    with pytest.raises(LifecycleError, match="Adapted.*not supported"):
-        context.deactivate()
-
-
-def test_empty_context_can_activate_and_deactivate():
-    context = ComponentContext()
-    assert context.activate().success
-    assert context.deactivate().state is None
-
-
-def test_configure_children_first_and_cleanup_parent_first():
-    events = []
-    first = ComponentContext(instance=RecordingPlugin("first", events))
-    second = ComponentContext(instance=RecordingPlugin("second", events))
-    plugin = RecordingPlugin("parent", events)
-    context = ComponentContext(instance=plugin, subcomponents={
-        "single": first, "multiple": [second]})
-
-    assert context.configure().success
-    assert plugin.context is context
-    assert context.cleanup().success
-    assert events == [("configure", "first"), ("configure", "second"),
-                      ("configure", "parent"), ("cleanup", "parent"),
-                      ("cleanup", "second"), ("cleanup", "first")]
-
-
-def test_failed_child_configuration_stops_before_siblings_and_parent():
-    events = []
-    failed = ComponentContext(instance=RecordingPlugin(
-        "failed", events, configure_error=ValueError("configuration rejected")))
-    context = ComponentContext(instance=RecordingPlugin("parent", events),
-                               subcomponents={"children": [failed,
-                                   ComponentContext(instance=RecordingPlugin("unreached", events))]})
-    with pytest.raises(LifecycleError, match="on_configure.*configuration rejected"):
-        context.configure()
-    assert events == [("configure", "failed")]
-
-
-def test_cleanup_continues_after_parent_and_child_errors():
+def test_cleanup_runs_parent_before_children_and_reports_errors():
     events = []
     logger = Mock()
-    context = ComponentContext(instance=RecordingPlugin(
-        "parent", events, cleanup_error=ValueError("parent cleanup failed")),
+    context = ComponentContext._create(
+        instance=RecordingPlugin("parent", events, cleanup_error=ValueError("parent failed")),
         subcomponents={"children": [
-            ComponentContext(instance=RecordingPlugin("first", events)),
-            ComponentContext(instance=RecordingPlugin(
-                "second", events, cleanup_error=ValueError("child cleanup failed")))]},
-        logger=logger)
+            ComponentContext._create(instance=RecordingPlugin("first", events), component_name="first"),
+            ComponentContext._create(instance=RecordingPlugin(
+                "second", events, cleanup_error=ValueError("child failed")), component_name="second"),
+        ]}, logger=logger)
 
-    with pytest.raises(LifecycleError, match="parent cleanup failed"):
-        context.cleanup()
+    with pytest.raises(LifecycleError, match="parent failed"):
+        ComponentRuntime(context).cleanup()
     assert events == [("cleanup", "parent"), ("cleanup", "second"), ("cleanup", "first")]
-    assert "child cleanup failed" in logger.error.call_args.args[0]
+    assert "child failed" in logger.error.call_args.args[0]
 
 
-@pytest.mark.parametrize("result", [None, CallbackResult.failure("cleanup rejected")])
-def test_cleanup_requires_successful_callback_result(result):
-    plugin = Plugin()
-    plugin.on_cleanup = Mock(return_value=result)
-    with pytest.raises(LifecycleError, match="on_cleanup"):
-        ComponentContext(instance=plugin).cleanup()
+def test_context_exposes_instances_and_views_but_not_lifecycle_or_slot_administration():
+    single = ComponentContext._create(instance=Plugin(), component_name="single")
+    first = ComponentContext._create(instance=Plugin(), component_name="first")
+    second = ComponentContext._create(instance=Plugin(), component_name="second")
+    context = ComponentContext(subcomponents={"single": single, "items": [first, second]},
+        spec={"single": "controllers::Controller", "items": "List[controllers::Controller]"})
+
+    assert context.get_subcomponent_instance("single") is single._instance
+    assert list(context.enumerate_subcomponent_instances("items")) == [first._instance, second._instance]
+    assert [view.get_instance() for view in context.enumerate_subcomponent_contexts("items")] == [
+        first._instance, second._instance]
+    assert not hasattr(context, "configure")
+    assert not hasattr(context, "load_component")
 
 
-def test_empty_context_can_configure_and_cleanup():
-    context = ComponentContext()
-    assert context.configure().success
-    assert context.cleanup().success
+def test_empty_runtime_can_complete_a_lifecycle():
+    runtime = ComponentRuntime(ComponentContext())
+    assert runtime.configure().success
+    assert runtime.activate().success
+    assert runtime.deactivate().result.success
+    assert runtime.cleanup().success

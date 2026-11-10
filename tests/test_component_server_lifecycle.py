@@ -1,4 +1,4 @@
-"""The component host configures plugins and always releases their resources."""
+"""The builder hands complete host-owned slots to the component server."""
 
 import asyncio
 from types import SimpleNamespace
@@ -12,49 +12,42 @@ from rpp_py.cli import component_server
 
 @pytest.fixture
 def server(monkeypatch):
-    context = SimpleNamespace(close=Mock(),
-                              configure=Mock(return_value=CallbackResult()),
-                              cleanup=Mock(return_value=CallbackResult()),
-                              get_instance=Mock())
     builder = Mock()
-    builder.build_from_component_roots.return_value = [context]
-    monkeypatch.setattr(component_server, "ComponentContextBuilder", Mock(return_value=builder))
+    host = Mock(run_async=AsyncMock(), close=Mock(return_value=CallbackResult()))
+    builder.build_component_server.return_value = host
+    monkeypatch.setattr(component_server, "ComponentRuntimeBuilder", Mock(return_value=builder))
     library = Mock()
-    library.get_plugin_info_from_lib.return_value = {"PluginName": "test"}
+    library.get_plugin_info_from_lib.return_value = {
+        "PluginName": "test", "PluginType": "test::Plugin",
+    }
     monkeypatch.setattr(component_server, "LibraryManager", Mock(return_value=library))
     monkeypatch.setattr(component_server, "DataManager", Mock())
-    host = Mock(run_async=AsyncMock())
-    monkeypatch.setattr(component_server, "RppServerHost", Mock(return_value=host))
-    monkeypatch.setattr(component_server, "PluginAdapter", Mock())
     monkeypatch.setattr(component_server, "RppLogger", Mock())
     args = SimpleNamespace(host="localhost", port=1234, home="/tmp/unused",
                            path=["component"], plugin=["test"], conn=["connection"])
-    return SimpleNamespace(context=context, host=host, args=args)
+    return SimpleNamespace(host=host, builder=builder, args=args)
 
 
-def test_host_configures_before_serving_and_cleans_before_stopping(server):
+def test_host_serves_builder_owned_slots_without_entering_lifecycle(server):
     events = []
-    server.context.configure.side_effect = lambda: events.append("configure")
     server.host.run_async.side_effect = lambda: events.append("serve")
-    server.context.cleanup.side_effect = lambda: events.append("cleanup")
-    server.context.close.side_effect = lambda: events.append("close")
+    server.host.close.side_effect = lambda: events.append("close") or CallbackResult()
 
     asyncio.run(component_server._run(server.args))
 
-    assert events == ["configure", "serve", "cleanup", "close"]
+    assert events == ["serve", "close"]
+    server.builder.build_component_server.assert_called_once()
 
 
-@pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_configuration_error_survives_shutdown_and_host_never_serves(server, cleanup_fails):
-    failure = LifecycleError("on_configure rejected")
-    server.context.configure.side_effect = failure
-    if cleanup_fails:
-        server.context.cleanup.side_effect = LifecycleError("on_cleanup rejected")
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_host_error_survives_slot_release(server, close_fails):
+    failure = LifecycleError("host rejected")
+    server.host.run_async.side_effect = failure
+    if close_fails:
+        server.host.close.side_effect = LifecycleError("close rejected")
 
     with pytest.raises(LifecycleError) as caught:
         asyncio.run(component_server._run(server.args))
 
     assert caught.value is failure
-    server.host.run_async.assert_not_awaited()
-    server.context.cleanup.assert_called_once()
-    server.context.close.assert_called_once()
+    server.host.close.assert_called_once()

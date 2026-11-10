@@ -26,6 +26,10 @@ class ExternalComponentSpec:
     component_path: str | Path
     plugin_name: str
     connection_name: str
+    # C++ component servers construct a host-owned slot per connection and
+    # therefore need its declaration on the command line.  Python servers
+    # derive it from the loaded plugin metadata instead.
+    slot_declaration: str = ""
 
 
 class ExternalComponentProcess:
@@ -37,7 +41,7 @@ class ExternalComponentProcess:
             command: str,
             host: str = "127.0.0.1", port: int | None = None,
             startup_timeout_ms: int = 5000,
-            logger: RppLogger | None = None) -> None:
+            logger: RppLogger | None = None, allow_dynamic_components=False) -> None:
         if not components:
             raise ValueError("A component process requires at least one component.")
 
@@ -48,6 +52,7 @@ class ExternalComponentProcess:
         self.port = port or _get_available_port()
         self.startup_timeout_ms = startup_timeout_ms
         self.logger = logger or RppLogger()
+        self.allow_dynamic_components = allow_dynamic_components
 
         self._process: subprocess.Popen | None = None
         self._runtime_client_context: RppRuntimeClientContext | None = None
@@ -67,6 +72,8 @@ class ExternalComponentProcess:
     def command_args(self) -> list[str]:
         args = [self.command, "--host", self.host, "--port", str(self.port),
                 "--home", str(self.rpp_home)]
+        if self.allow_dynamic_components:
+            args.append("--allow-dynamic-components")
         for _, component in self.components:
             args.extend([
                 "--path", str(component.component_path),
@@ -144,6 +151,34 @@ class ExternalComponentProcess:
         self._runtime_client = PluginRuntimeClient(logger=self.logger)
         await self._runtime_client.connect(context=self._runtime_client_context)
 
+    def configure_component(self, name):
+        if not self._started:
+            raise RuntimeError("Component process is not prepared")
+        return self._executor.call(self._runtime_client.configure_component(name))
+
+    def cleanup_component(self, name):
+        if not self._started:
+            raise RuntimeError("Component process is not prepared")
+        return self._executor.call(self._runtime_client.cleanup_component(name))
+
+    def activate_component(self, name, state=None):
+        if not self._started:
+            raise RuntimeError("Component process is not prepared")
+        return self._executor.call(self._runtime_client.activate_component(
+            name, state, adapter=self._adapter_for(name)))
+
+    def deactivate_component(self, name):
+        if not self._started:
+            raise RuntimeError("Component process is not prepared")
+        return self._executor.call(self._runtime_client.deactivate_component(
+            name, adapter=self._adapter_for(name)))
+
+    def _adapter_for(self, connection_name):
+        for adapter, component in self.components:
+            if component.connection_name == connection_name:
+                return adapter
+        raise RuntimeError(f"No adapter registered for component connection {connection_name!r}")
+
     async def _disconnect_adapters(self) -> None:
         errors = []
         if self._runtime_client is not None:
@@ -193,6 +228,24 @@ class CppExternalComponentProcess(ExternalComponentProcess):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(command=self.resolve_command(), **kwargs)
 
+    @property
+    def command_args(self) -> list[str]:
+        args = [self.command, "--host", self.host, "--port", str(self.port),
+                "--home", str(self.rpp_home)]
+        if self.allow_dynamic_components:
+            args.append("--allow-dynamic-components")
+        for _, component in self.components:
+            if not component.slot_declaration:
+                raise ValueError(
+                    "A C++ hosted component requires a slot declaration.")
+            args.extend([
+                "--path", str(component.component_path),
+                "--plugin", component.plugin_name,
+                "--conn", component.connection_name,
+                "--slot", component.slot_declaration,
+            ])
+        return args
+
     @classmethod
     def resolve_command(cls) -> str:
         command_path = shutil.which(cls._command)
@@ -222,8 +275,9 @@ class CppExternalComponentProcess(ExternalComponentProcess):
 
 
 class _SharedExternalComponentProcessHandle:
-    def __init__(self, process: ExternalComponentProcess) -> None:
+    def __init__(self, process: ExternalComponentProcess, connection_name: str) -> None:
         self._process = process
+        self._connection_name = connection_name
         self._closed = False
 
     def prepare(self) -> None:
@@ -236,6 +290,26 @@ class _SharedExternalComponentProcessHandle:
             return
         self._process.release()
         self._closed = True
+
+    def configure(self):
+        if self._closed:
+            raise RuntimeError("Cannot configure a released component process handle")
+        return self._process.configure_component(self._connection_name)
+
+    def cleanup(self):
+        if self._closed:
+            raise RuntimeError("Cannot clean up a released component process handle")
+        return self._process.cleanup_component(self._connection_name)
+
+    def activate(self, state=None):
+        if self._closed:
+            raise RuntimeError("Cannot activate a released component process handle")
+        return self._process.activate_component(self._connection_name, state)
+
+    def deactivate(self):
+        if self._closed:
+            raise RuntimeError("Cannot deactivate a released component process handle")
+        return self._process.deactivate_component(self._connection_name)
 
     def __del__(self):
         try:
@@ -254,6 +328,11 @@ class ExternalComponentProcessRegistry:
     def begin_build(self) -> None:
         """Group hosts within this build; existing handles retain their owners."""
         self._shared_processes.clear()
+
+    def clone(self):
+        registry = ExternalComponentProcessRegistry()
+        registry._factories = self._factories.copy()
+        return registry
 
     def register(
             self, language: str, factory: Callable[..., Any], *,
@@ -287,11 +366,11 @@ class ExternalComponentProcessRegistry:
                     kwargs["adapter_client"],
                     ExternalComponentSpec(
                         kwargs["component_path"], kwargs["plugin_name"],
-                        kwargs["connection_name"],
+                        kwargs["connection_name"], kwargs.get("slot_declaration", ""),
                     ),
                 )
             process._active_handles += 1
-            return _SharedExternalComponentProcessHandle(process)
+            return _SharedExternalComponentProcessHandle(process, kwargs["connection_name"])
         return factory(**kwargs)
 
     @staticmethod
@@ -303,6 +382,7 @@ class ExternalComponentProcessRegistry:
                 factory_kwargs.pop("component_path"),
                 factory_kwargs.pop("plugin_name"),
                 factory_kwargs.pop("connection_name"),
+                factory_kwargs.pop("slot_declaration", ""),
             ),
         )]
         return factory_kwargs
