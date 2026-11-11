@@ -19,6 +19,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
     container:
       image: ghcr.io/coe-marble/rpp-test-container:lyrical-ubuntu26.04-capnp1.1.0-v1
       credentials:
