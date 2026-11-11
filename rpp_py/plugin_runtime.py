@@ -353,8 +353,7 @@ class PluginRuntimeServer:
                 result = self.owner._invoke(slot.refresh_adapter)
                 if not result.success:
                     raise LifecycleError(result.message)
-                adapter = slot.adapter
-                _context.results.pluginRef = adapter
+                _context.results.pluginRef = slot.adapter.create_capability_adapter_server__()
 
         methods = {
                 "ping": ping,
