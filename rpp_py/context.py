@@ -163,6 +163,18 @@ class ComponentContext:
     def _has_active_work(self):
         return self._activation_outstanding or any(slot.deactivation_contexts() for slot in self._slots.values())
 
+    def _deactivate_descendants_for_shutdown(self, *, timeout=None):
+        # Shutdown must stop the whole tree before cleanup. Ordinary deactivate()
+        # leaves child control to the plugin; an inactive child may therefore
+        # still own active grandchildren that need to be stopped here.
+        first_error = self.deactivate_subcomponents(timeout=timeout)
+        for manager in reversed(list(self._slots.values())):
+            for child in reversed(manager.contexts()):
+                result = child._deactivate_descendants_for_shutdown(timeout=timeout)
+                if not result.success and first_error.success:
+                    first_error = result
+        return first_error
+
     def _close(self):
         """Release resources after managed lifecycle teardown."""
         errors = []

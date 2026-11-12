@@ -80,6 +80,44 @@ def test_runtime_processes_child_self_deactivation_without_stopping_siblings():
     assert second.is_active()
     assert events == [("deactivate", "first")]
     runtime.close().require_success()
+    assert events == [("deactivate", "first"), ("deactivate", "second"),
+                      ("cleanup", "parent"), ("cleanup", "second"), ("cleanup", "first")]
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_close_stops_active_grandchildren_and_retains_the_tree_after_failure(managed):
+    from rpp_py.component_manager import ComponentManager
+
+    events = []
+    plugin = RecordingPlugin("grandchild", events, deactivation_error=ValueError("stop rejected"))
+    grandchild = ComponentContext._create(instance=plugin, component_name="grandchild")
+    parent = ComponentContext._create(instance=RecordingPlugin("parent", events),
+                                      subcomponents={"children": [grandchild]})
+    context = ComponentContext._create(instance=RecordingPlugin("root", events),
+                                       subcomponents={"parents": [parent]})
+    manager = ComponentManager() if managed else None
+    if managed:
+        manager.adopt("root", context, initial=True).require_success()
+    runtime = ComponentRuntime(context, manager, "root" if managed else None)
+    runtime.configure().require_success()
+    parent.activate_subcomponents().require_success()
+    assert not parent.is_active()
+    assert grandchild.is_active()
+    events.clear()
+
+    if managed:
+        assert not runtime.close().success
+    else:
+        with pytest.raises(LifecycleError, match="stop rejected"):
+            runtime.close()
+    assert events == [("deactivate", "grandchild")]
+    assert grandchild._instance is plugin
+
+    plugin.deactivation_error = None
+    runtime.close().require_success()
+    assert events[:2] == [("deactivate", "grandchild"), ("deactivate", "grandchild")]
+    assert context._released
+    assert grandchild._released
 
 
 def test_runtime_does_not_implicitly_activate_or_deactivate_subcomponents():

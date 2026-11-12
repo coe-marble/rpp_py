@@ -398,6 +398,9 @@ class ComponentManager:
             if result.success and entry.context is not None:
                 if entry.may_be_active:
                     result = self._stop(entry).result
+                if result.success:
+                    result = self._capture("deactivate descendants",
+                        lambda: entry.context._deactivate_descendants_for_shutdown(timeout=timeout))
                 if result.success and entry.configured:
                     result = self._capture("cleanup", entry.context._cleanup)
                     if result.success:

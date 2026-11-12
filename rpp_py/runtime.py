@@ -52,6 +52,8 @@ class _Runtime:
             self._context._check_guarded_call()
             if self._context._has_active_work():
                 self._context._deactivate()
+            self._context._deactivate_descendants_for_shutdown(timeout=timeout).require_success(
+                "deactivate descendants before close")
             if self._context._configuration_attempted:
                 self._context._cleanup()
             self._context._close()
