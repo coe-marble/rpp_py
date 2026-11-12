@@ -1,6 +1,8 @@
 
 from typing import Dict
 import weakref
+import uuid
+from threading import RLock
 
 from rpp_py.component_slots import ComponentSlot, SlotKind, parse_component_slot_type
 from rpp_py.component_manager import ComponentManager
@@ -17,23 +19,21 @@ class SubcomponentContext:
         self._context = context
 
     def get_instance(self):
+        self._context._owning_manager()
         instance = self._context._instance
         if instance is None:
             raise LifecycleError("Subcomponent instance is not loaded")
         return instance
 
     def get_instance_id(self):
-        manager = self._context._owning_manager()
-        if manager is None:
-            raise LifecycleError("The subcomponent is not owned by a slot")
-        return manager.get_info(self._context._owner_name).instance_id
+        return self._context.get_instance_id()
 
     def is_native(self):
+        self._context._ensure_attached()
         return self._context._is_native
 
     def is_active(self):
-        manager = self._context._owning_manager()
-        return manager is not None and manager.get_state(self._context._owner_name) is LifecycleState.ACTIVE
+        return self._context.is_active()
 
     def activate(self, state=None):
         manager = self._context._owning_manager()
@@ -75,8 +75,12 @@ class ComponentContext:
             clock_options=None, logger=None, runtime=None, *,
             allow_dynamic_components=False, component_factory=None,
             component_name="", component_reference="", plugin_type="",
-            registration_validators=None):
+            registration_validators=None, named_registration_validators=None):
         self._instance = instance
+        self._instance_id = str(uuid.uuid4()) if instance is not None else ""
+        self._released = False
+        self._deactivation_lock = RLock()
+        self._deactivation_pending = False
         self._params = params or Parameters()
         spec = spec or {}
         self._slot_types = {}
@@ -106,10 +110,13 @@ class ComponentContext:
                 self._slot_types[name] = slot
                 if slot.kind is SlotKind.SINGLE and len(children) > 1:
                     raise LifecycleError(f"Single slot {name!r} must be constructed with one component")
+                dynamic = (allow_dynamic_components(name, slot) if callable(allow_dynamic_components)
+                           else bool(allow_dynamic_components))
                 manager = ComponentManager(factory=component_factory,
                     activation_policy=slot.activation_policy,
-                    allow_dynamic_components=allow_dynamic_components, plugin_type=slot.plugin_type,
-                    validator=(registration_validators or {}).get(name))
+                    allow_dynamic_components=dynamic, plugin_type=slot.plugin_type,
+                    validator=(registration_validators or {}).get(name),
+                    named_validators=(named_registration_validators or {}).get(slot.plugin_type, {}))
                 self._slots[name] = manager
                 for index, child in enumerate(children):
                     entry_name = child._component_name or str(index)
@@ -127,12 +134,19 @@ class ComponentContext:
         self._owner_name = name
 
     def _owning_manager(self):
+        self._ensure_attached()
         if self._owner is None:
             return None
         manager = self._owner()
         if manager is None:
             raise LifecycleError("The component's owning slot has been released")
+        if manager._entry(self._owner_name).context is not self:
+            raise LifecycleError("Stale component context generation")
         return manager
+
+    def _ensure_attached(self):
+        if self._released:
+            raise LifecycleError("The component runtime has been released")
 
     def _slot(self, name):
         if name not in self._slots:
@@ -168,6 +182,9 @@ class ComponentContext:
             raise errors[0]
         self._instance = None
         self._slots.clear()
+        with self._deactivation_lock:
+            self._released = True
+            self._deactivation_pending = False
 
     def __del__(self):
         # Explicit close reports errors and releases resources even with cycles.
@@ -255,6 +272,8 @@ class ComponentContext:
                     raise LifecycleError("remote deactivate must return DeactivationResult")
                 Plugin._require_callback_result(result.result, "remote deactivate")
                 self._activation_outstanding = False
+                with self._deactivation_lock:
+                    self._deactivation_pending = False
                 return result
             if self._instance is not None and self._activation_outstanding:
                 result = self._instance.deactivate_state()
@@ -265,11 +284,57 @@ class ComponentContext:
             for error in errors[1:]:
                 self._logger.error(f"Additional component deactivation failure: {error!r}")
             raise errors[0]
+        with self._deactivation_lock:
+            self._deactivation_pending = False
         return result
 
 
     def get_clock(self) -> Clock:
         return self._clock
+
+    def get_instance_id(self):
+        self._owning_manager()
+        return self._instance_id
+
+    def is_active(self):
+        manager = self._owning_manager()
+        return manager is not None and manager.get_state(self._owner_name) is LifecycleState.ACTIVE
+
+    def request_deactivation(self):
+        """Record a request; callbacks run later in runtime.process_deactivations()."""
+        with self._deactivation_lock:
+            if self._released:
+                return CallbackResult.failure("The component runtime has been released")
+            if self._owning_manager() is None:
+                return CallbackResult.failure("A script has no component to deactivate")
+            self._deactivation_pending = True
+        return CallbackResult()
+
+    def _process_deactivations(self, *, timeout=None):
+        self._ensure_attached()
+        with self._deactivation_lock:
+            pending = self._deactivation_pending
+            self._deactivation_pending = False
+        first_error = CallbackResult()
+        if pending:
+            try:
+                manager = self._owning_manager()
+                first_error = manager.deactivate(self._owner_name, timeout=timeout,
+                                                 _context=self).result
+            except Exception as error:
+                first_error = CallbackResult.failure(f"Self-deactivation failed: {error}")
+            if not first_error.success:
+                with self._deactivation_lock:
+                    self._deactivation_pending = True
+        for manager in self._slots.values():
+            for child in manager.contexts():
+                try:
+                    result = child._process_deactivations(timeout=timeout)
+                except Exception as error:
+                    result = CallbackResult.failure(str(error))
+                if not result.success and first_error.success:
+                    first_error = result
+        return first_error
 
     def get_logger(self) -> RppLogger:
         return self._logger

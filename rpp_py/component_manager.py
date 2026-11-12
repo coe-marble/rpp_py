@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 import inspect
-import uuid
 from threading import Condition, RLock, get_ident
 
 from rpp_py.lifecycle import (
@@ -61,12 +60,14 @@ class ComponentManager:
     """
 
     def __init__(self, *, factory=None, activation_policy=ActivationPolicy.MULTIPLE,
-                 allow_dynamic_components=False, plugin_type="", validator=None):
+                 allow_dynamic_components=False, plugin_type="", validator=None,
+                 named_validators=None):
         self._factory = factory
         self._policy = activation_policy
         self._dynamic = allow_dynamic_components
         self._plugin_type = plugin_type
         self._validator = validator
+        self._named_validators = dict(named_validators or {})
         self._validating = False
         self._selected = None
         self._entries = {}
@@ -116,13 +117,24 @@ class ComponentManager:
         candidate_type = candidate._plugin_type
         if self._plugin_type and candidate_type and candidate_type != self._plugin_type:
             return CallbackResult.failure(f"Expected component type {self._plugin_type}, got {candidate_type}")
-        if self._validator is None:
+        # A slot can have a general admission rule and a rule for this specific
+        # registration name. Both must accept the candidate, as in rpp_cpp.
+        named_validator = self._named_validators.get(name)
+        if self._validator is None and named_validator is None:
             return CallbackResult()
+        from rpp_py.runtime import ComponentRuntime
         self._validating = True
         try:
-            registered = tuple(entry.context for key, entry in self._entries.items()
+            registered = tuple(ComponentRuntime(entry.context, self, key)
+                               for key, entry in self._entries.items()
                                if key != name and entry.context is not None)
-            return self._capture("registration validator", lambda: self._validator(candidate, registered))
+            view = ComponentRuntime(candidate, self, name)
+            for validator in (self._validator, named_validator):
+                if validator is not None:
+                    result = self._capture("registration validator", lambda: validator(view, registered))
+                    if not result.success:
+                        return result
+            return CallbackResult()
         finally:
             self._validating = False
 
@@ -146,7 +158,7 @@ class ComponentManager:
         context._bind(self, name)
         with self._lock:
             self._entries[name] = _Entry(name=name, component=component, context=context,
-                                        generation=1, instance_id=str(uuid.uuid4()),
+                                        generation=1, instance_id=context._instance_id,
                                         state=LifecycleState.UNCONFIGURED)
         if self._selected is None:
             self._selected = name
@@ -273,7 +285,7 @@ class ComponentManager:
                 with entry.condition:
                     entry.context = candidate
                 entry.generation += 1
-                entry.instance_id = str(uuid.uuid4())
+                entry.instance_id = candidate._instance_id
                 entry.configured = False
                 entry.may_be_active = False
             except Exception as error:

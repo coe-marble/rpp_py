@@ -37,6 +37,7 @@ def build(monkeypatch):
                plugin_name="lib::Cpp", subcomponents={}, subcomponent_spec={})
                for name in ("first", "second")}
     registry = SimpleNamespace(begin_build=Mock(), create=Mock())
+    registry.clone = lambda: registry
     manager = SimpleNamespace(lm=SimpleNamespace(rpp_home="/test"),
         get_plugin_info_from_lib=lambda _: {
             "SourceLanguage": "cpp", "PluginName": "lib::Cpp",

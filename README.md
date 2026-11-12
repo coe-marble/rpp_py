@@ -13,61 +13,68 @@ types and workspace workflows.
 
 ## Contexts and managed slots
 
-Applications create contexts through the builder. The build-time option controls
-whether the resulting tree may change its component population or selection:
+Applications build `ComponentRuntime` or `ScriptRuntime` handles through
+`ComponentRuntimeBuilder`. Runtime handles own lifecycle and slot administration;
+plugins receive `ComponentContext` for parameters, services, and child access.
 
 ```python
 from rpp_py.context_builder import ComponentRuntimeBuilder
 
-builder = ComponentRuntimeBuilder(
-    data_manager=data_manager,
-    allow_dynamic_components=True,  # Default: False.
-)
-context = builder.build_script_from_path(script_path)
+builder = ComponentRuntimeBuilder(data_manager=data_manager, allow_dynamic_components=True)
+runtime = builder.build_script_from_path(script_path)
 try:
-    context.configure()
-    context.activate()
-    controller = context.get_component("controller")
-    # Use the controller from the application's normal loop.
+    runtime.configure().require_success()
+    runtime.get_context().activate_subcomponents().require_success()
+    # Use runtime.load_component(), switch_component(), etc. as needed.
 finally:
-    context.close()
+    runtime.close().require_success()
 ```
 
-Each slot owns an internal `ComponentManager`; application code does not create
-or retrieve it. `get_parameter`, `get_component`, `get_components`, and
-`list_subcomponents` remain context methods. `get_subcomponent_context(slot)`
-returns the selected context; `get_subcomponent_contexts(slot)` returns the
-collection. The singular accessor also accepts a component entry name.
-Single and `Option[T]` slots allow at most one active entry; `List[T]` allows
-several. Only list slots return a list from Python `get_component`.
+`allow_dynamic_components` defaults to `False`. It accepts a boolean or a
+callback `(slot_name, ComponentSlot) -> bool`, evaluated once for each slot,
+including nested component slots. Component root handles remain fixed.
+`Single` and `Option[T]` slots allow at most one active entry; `List[T]` slots
+allow several. The callback is local and is not passed to external hosts.
 
-With dynamic changes disabled, initial construction, ordinary lifecycle, and
-whole-tree closure remain available. Runtime load/unload, replacement, and
-switching to another exclusive candidate return failure. With changes enabled,
-use context operations such as `load_component(slot, name, component_path)`,
-`configure_component`, `activate_component`, `unload_component`, and
-`switch_component(slot, source, target, transfer_state=True)`.
+`get_subcomponent_context(slot, component_name=None)` returns a child view.
+List slots require the component name. Use `enumerate_subcomponent_contexts()`
+to visit loaded children. Initial registrations use workspace component names,
+not their storage IDs. Self and child views expose `get_instance_id()` and
+`is_active()`; instance IDs survive lifecycle changes and change on replacement.
 
-Returned component references must not be retained across unloading/replacement.
-When calls can overlap management, borrow with
-`with context.active_component(slot, name) as component:`; this scope can span
-an `await` on a component method. No async manager facade is required.
+A plugin can call `context.request_deactivation()` from a guarded call or worker.
+This records a request without invoking callbacks. The application calls
+`runtime.process_deactivations(timeout=...)` from its lifecycle thread to process
+the tree. Repeated requests coalesce; failed requests remain pending for retry.
+Script contexts have no component of their own to deactivate.
 
-Registration validators receive the unconfigured candidate context and a tuple
-of existing contexts, including inactive candidates, and return `CallbackResult`.
-Use parameters/plugin metadata for admission; validators must not perform
-lifecycle operations. Supply initial validators to the builder as
-`registration_validators={str(component_path): {slot: validator}}`, or install
-a rule for future admissions through
-`context.set_registration_validator(slot, validator)`. Installing a new rule
-does not evict or revalidate existing entries. Rejected candidates are released
-without replacing existing entries; a destructive reload still reports its
-actual remaining state if final admission fails.
+Initial validators use
+`registration_validators={plugin_type: {component_name: validator}}` and apply
+to matching names in every slot, including later dynamic loads. A validator
+receives the candidate `ComponentRuntime` and a tuple of registered runtime
+views; inspect parameters through `runtime.get_context()`. Validators must not
+perform lifecycle operations. `runtime.set_registration_validator(slot, validator)`
+sets an additional rule for future admissions in that slot. Both rules run;
+existing registrations are not revalidated.
+
+`ScriptRequest.parts_folder` selects an alternative parts directory for any
+script source. The `build_script_from_*` convenience methods accept the same
+`parts_folder` keyword. `builder.register_external_component_server(language,
+command)` selects an executable for future adapted builds without launching it;
+existing runtimes and their loaders keep their registered server commands.
 
 Clock/logger configuration belongs to the builder. Transport handles, factories,
 and component identity are internal construction data; the public context
 constructor does not expose them. Adapted configure/cleanup is supported;
 adapted activation/deactivation and typed handover remain pending.
+
+`builder.set_parameter_overrides({"library::Plugin": {"parameter": value}})`
+replaces the overrides used for future builds. Values override workspace
+parameters for every matching native Python component, including nested
+components. Undeclared parameter names and overrides targeting adapted plugins
+are rejected, matching `rpp_cpp`'s native-component restriction. Input values are
+copied; existing runtimes and their future dynamic loads retain the overrides
+captured when they were built. Pass `{}` to clear overrides for new builds.
 
 The builder returns a tree with external hosts and adapter connections already
 prepared. Building a purely native Python tree creates no event loop, RPC

@@ -202,6 +202,27 @@ def test_shared_process_stops_only_after_last_owner_releases(harness):
     harness.child.wait.assert_called_once_with(timeout=2)
 
 
+def test_registered_server_commands_are_normalized_and_preserved_by_clones(monkeypatch):
+    monkeypatch.setattr(processes, "_get_available_port", lambda: 12345)
+    registry = processes.ExternalComponentProcessRegistry()
+    registry.register_server(" CPP ", "/servers/original")
+    snapshot = registry.clone()
+    registry.register_server("cpp", "/servers/replacement")
+    handles = []
+    for configured, expected in [(snapshot, "/servers/original"), (registry, "/servers/replacement")]:
+        handle = configured.create("cpp", adapter_client=Mock(), component_path="/component",
+            plugin_name="example::Plugin", connection_name="example", slot_declaration="example::Type",
+            rpp_home="/home")
+        handles.append(handle)
+        assert handle._process.command_args[0] == expected
+        assert "--slot" in handle._process.command_args
+        assert not handle._process._started
+    for handle in handles:
+        handle.close()
+    with pytest.raises(ValueError, match="required"):
+        registry.register_server("cpp", "")
+
+
 def test_new_build_gets_its_own_host_without_closing_the_previous_owner(harness):
     registry = processes.ExternalComponentProcessRegistry()
     registry.register("cpp", lambda **kwargs: processes.ExternalComponentProcess(

@@ -11,6 +11,7 @@ from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError,
 from rpp_py.context import ComponentContext
 from rpp_py.plugin import Plugin
 from rpp_py.component_manager import ComponentManager
+from rpp_py.runtime import ComponentRuntime
 
 
 @dataclass
@@ -66,6 +67,45 @@ def ready(manager, name="localizer"):
     assert manager.load(name, component="/workspace/localizer").success
     assert manager.configure(name).success
     assert manager.activate(name).success
+
+
+def test_self_deactivation_is_deferred_and_coalesces_requests(setup_manager):
+    manager, _, events, _ = setup_manager
+    ready(manager)
+    context = manager._entry("localizer").context
+    runtime = ComponentRuntime(context, manager, "localizer")
+    instance_id = context.get_instance_id()
+    events.clear()
+    with manager.active("localizer"):
+        assert context.request_deactivation().success
+        assert context.request_deactivation().success
+        assert context.is_active()
+        assert events == []
+        assert not runtime.process_deactivations(timeout=0).success
+    assert runtime.process_deactivations().success
+    assert events == ["deactivate"]
+    assert not context.is_active()
+    assert context.get_instance_id() == instance_id
+    assert instance_id == manager.get_info("localizer").instance_id
+
+
+def test_failed_self_deactivation_remains_pending_and_released_context_is_stale(setup_manager):
+    manager, plugins, _, _ = setup_manager
+    ready(manager)
+    context = manager._entry("localizer").context
+    runtime = ComponentRuntime(context, manager, "localizer")
+    previous_id = context.get_instance_id()
+    plugins[0].reject = "deactivate"
+    assert context.request_deactivation().success
+    assert not runtime.process_deactivations().success
+    plugins[0].reject = None
+    assert runtime.process_deactivations().success
+    assert manager.reload("localizer").success
+    replacement = manager._entry("localizer").context
+    assert replacement.get_instance_id() != previous_id
+    assert not context.request_deactivation().success
+    with pytest.raises(LifecycleError, match="released"):
+        context.is_active()
 
 
 def test_failed_load_cleanup_preserves_error_and_allows_unload_retry(setup_manager):

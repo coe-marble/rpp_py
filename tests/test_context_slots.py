@@ -28,8 +28,8 @@ def root(declaration, children, *, dynamic=False, factory=None, validator=None):
 
 
 def no_axis_overlap(candidate, registered):
-    claimed = set().union(*(entry._instance.axes for entry in registered))
-    overlap = claimed & candidate._instance.axes
+    claimed = set().union(*(entry.get_instance().axes for entry in registered))
+    overlap = claimed & candidate.get_instance().axes
     return (CallbackResult.failure(f"Control axes already registered: {sorted(overlap)}")
             if overlap else CallbackResult())
 
@@ -90,3 +90,44 @@ def test_context_reports_slot_kind_without_exposing_its_manager():
     _, context = root("List[controllers::Controller]", [child("surge")])
     assert context.parse_component_slot_type("List[controllers::Controller]").kind is SlotKind.LIST
     assert not hasattr(context, "load_component")
+
+
+def test_dynamic_policy_is_evaluated_per_slot_including_empty_slots():
+    calls = []
+
+    def policy(name, slot):
+        calls.append((name, slot.kind))
+        return name == "enabled"
+
+    context = ComponentContext._create(
+        spec={"enabled": "List[controllers::Controller]", "fixed": "Option[controllers::Controller]"},
+        allow_dynamic_components=policy, component_factory=lambda _: child("loaded"))
+    runtime = ComponentRuntime(context)
+    assert calls == [("enabled", SlotKind.LIST), ("fixed", SlotKind.OPTION)]
+    assert runtime.load_component("enabled", "loaded", "/component").success
+    assert not runtime.load_component("fixed", "loaded", "/component").success
+    assert len(calls) == 2
+    runtime.close().require_success()
+
+
+def test_named_validators_apply_to_initial_names_and_dynamic_registration_names():
+    calls = []
+
+    def validator(candidate, registered):
+        calls.append((candidate.get_context().get_instance_id(),
+                      tuple(item.get_instance().axes for item in registered)))
+        return CallbackResult.failure("name rejected") if registered else CallbackResult()
+
+    context = ComponentContext._create(
+        spec={"controllers": "List[controllers::Controller]"},
+        subcomponents={"controllers": [child("first", ["surge"])]},
+        allow_dynamic_components=True, component_factory=lambda _: child("workspace_name"),
+        named_registration_validators={"controllers::Controller": {
+            "first": validator, "blocked": validator}})
+    runtime = ComponentRuntime(context)
+    assert len(calls) == 1
+    assert not runtime.load_component("controllers", "blocked", "/component").success
+    assert len(calls) == 2
+    assert calls[0][0]
+    assert calls[1][1] == ({"surge"},)
+    runtime.close().require_success()

@@ -65,6 +65,23 @@ def test_runtime_configures_children_before_parent():
                       ("configure", "parent")]
 
 
+def test_runtime_processes_child_self_deactivation_without_stopping_siblings():
+    events = []
+    runtime, context = tree(events)
+    runtime.configure().require_success()
+    context.activate_subcomponents().require_success()
+    first = context.get_subcomponent_context("children", "first")
+    second = context.get_subcomponent_context("children", "second")
+    events.clear()
+    first.get_instance().context.request_deactivation().require_success()
+    assert first.is_active()
+    runtime.process_deactivations().require_success()
+    assert not first.is_active()
+    assert second.is_active()
+    assert events == [("deactivate", "first")]
+    runtime.close().require_success()
+
+
 def test_runtime_does_not_implicitly_activate_or_deactivate_subcomponents():
     events = []
     runtime, context = tree(events)

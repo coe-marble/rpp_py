@@ -1,6 +1,7 @@
 
 
 from pathlib import Path
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict
 
@@ -30,6 +31,7 @@ from rpp_py.logger import RppLogger
 class ComponentRuntimeBuilder:
 
     ComponentRoot = ComponentRequest
+    ParameterOverrides = dict[str, dict[str, object]]
 
     @dataclass
     class _ComponentNode:
@@ -57,31 +59,32 @@ class ComponentRuntimeBuilder:
             or default_external_component_process_registry()
         self.logger = logger or RppLogger()
         self.allow_dynamic_components = allow_dynamic_components
-        self.registration_validators = registration_validators or {}
+        self.registration_validators = {kind: dict(rules)
+                                        for kind, rules in (registration_validators or {}).items()}
+        self._parameter_overrides: ComponentRuntimeBuilder.ParameterOverrides = {}
         self._prepared_components: dict[str, ComponentRuntimeBuilder._PreparedComponent] = {}
 
-    def _context_options(self, path, *, allow_dynamic_components=False):
-        """Construction options for one context.
+    def set_parameter_overrides(self, overrides: ParameterOverrides) -> None:
+        """Replace overrides for future builds, keyed by qualified plugin and parameter name.
 
-        Only script-level slots are composition roots.  A component's own
-        subcomponent slots are fixed by its component record, even when the
-        surrounding builder permits dynamic top-level composition.
+        Applies to matching native Python components, including nested components.
+        Names must be declared by the plugin. Existing runtimes retain their
+        resolved values; adapted components reject overrides, as in rpp_cpp.
         """
-        dynamic = allow_dynamic_components
-        data_manager = self.data_manager
-        clock_options = self.clock_options
-        logger = self.logger
-        validators = self.registration_validators
-        registry = self.external_component_process_registry
+        self._parameter_overrides = deepcopy(overrides)
 
-        def build(component_path):
-            builder = ComponentRuntimeBuilder(data_manager=data_manager, clock_options=clock_options,
-                logger=logger, external_component_process_registry=registry.clone(),
-                allow_dynamic_components=dynamic, registration_validators=validators)
-            return builder._build_root_context(component_path)
+    def register_external_component_server(self, language: str, command: str) -> None:
+        """Select the server executable for future adapted component builds."""
+        self.external_component_process_registry.register_server(language, command)
 
-        return dict(allow_dynamic_components=dynamic, component_factory=build if dynamic else None,
-                    registration_validators=validators.get(str(path), {}))
+    def _context_options(self, path, *, allow_dynamic_components=None):
+        """Snapshot construction policy for these slots and their future loads."""
+        dynamic = (self.allow_dynamic_components if allow_dynamic_components is None
+                   else allow_dynamic_components)
+        return dict(allow_dynamic_components=dynamic,
+                    component_factory=self._dynamic_root_loader(),
+                    named_registration_validators={kind: dict(rules)
+                        for kind, rules in self.registration_validators.items()})
 
 
     def build_component_from_path(
@@ -129,42 +132,47 @@ class ComponentRuntimeBuilder:
 
     def build_script_from_path(
             self, script_path: str | Path, *,
-            configuration: str | None = None) -> ScriptRuntime:
+            configuration: str | None = None,
+            parts_folder: str | Path | None = None) -> ScriptRuntime:
         """Build a local script using the description beside its workspace."""
         description_path = self.data_manager.\
             get_default_script_description_path(script_path)
         return self._build_script_from_description_path(
-            description_path, configuration=configuration
+            description_path, configuration=configuration, parts_folder=parts_folder
         )
 
     def build_script(self, request: ScriptRequest) -> ScriptRuntime:
         source = request.source
         if isinstance(source, ScriptPath):
-            return self.build_script_from_path(source.path, configuration=request.configuration)
+            return self.build_script_from_path(source.path, configuration=request.configuration,
+                                               parts_folder=request.parts_folder)
         if isinstance(source, LibraryScript):
             return self.build_script_from_library(
-                source.library_name, source.script_name, configuration=request.configuration)
+                source.library_name, source.script_name, configuration=request.configuration,
+                parts_folder=request.parts_folder)
         if isinstance(source, ScriptDescriptionPath):
             return self.build_script_from_description_path(
-                source.path, configuration=request.configuration)
+                source.path, configuration=request.configuration, parts_folder=request.parts_folder)
         raise TypeError(f"Unsupported script source: {type(source).__name__}")
 
     def build_script_from_library(
             self, library_name: str, script_name: str, *,
-            configuration: str | None = None) -> ScriptRuntime:
+            configuration: str | None = None,
+            parts_folder: str | Path | None = None) -> ScriptRuntime:
         """Build a local or linked script from the current workspace."""
         description_path = self.data_manager.\
             get_script_description_path_from_library(library_name, script_name)
         return self._build_script_from_description_path(
-            description_path, configuration=configuration
+            description_path, configuration=configuration, parts_folder=parts_folder
         )
 
     def build_script_from_description_path(
             self, script_description_path: str | Path, *,
-            configuration: str | None = None) -> ScriptRuntime:
+            configuration: str | None = None,
+            parts_folder: str | Path | None = None) -> ScriptRuntime:
         """Build a script context from an explicit description path."""
         return self._build_script_from_description_path(
-            script_description_path, configuration=configuration
+            script_description_path, configuration=configuration, parts_folder=parts_folder
         )
 
     def _build_script_from_description_path(
@@ -218,8 +226,7 @@ class ComponentRuntimeBuilder:
     def _root_runtime(self, context: ComponentContext) -> ComponentRuntime:
         """Put every root in a fixed root slot, exactly as C++ does."""
         manager = ComponentManager(
-            allow_dynamic_components=self.allow_dynamic_components,
-            factory=self._dynamic_root_loader())
+            allow_dynamic_components=False)
         name = context._component_name or "root"
         result = manager.adopt(name, context, context._component_reference, initial=True)
         result.require_success(f"register root {name}")
@@ -230,15 +237,17 @@ class ComponentRuntimeBuilder:
         data_manager = self.data_manager
         clock_options = self.clock_options
         logger = self.logger
-        registry = self.external_component_process_registry
+        registry = self.external_component_process_registry.clone()
         dynamic = self.allow_dynamic_components
-        validators = self.registration_validators
+        validators = {kind: dict(rules) for kind, rules in self.registration_validators.items()}
+        overrides = self._parameter_overrides
 
         def build(component_path, plugin_name=""):
             builder = ComponentRuntimeBuilder(
                 data_manager=data_manager, clock_options=clock_options, logger=logger,
                 external_component_process_registry=registry.clone(),
                 allow_dynamic_components=dynamic, registration_validators=validators)
+            builder.set_parameter_overrides(overrides)
             return builder._build_root_context(component_path, plugin_name)
         return build
 
@@ -281,8 +290,9 @@ class ComponentRuntimeBuilder:
                     raise RuntimeError(
                         "A hosted slot cannot mix top-level components and subcomponents")
                 top_level_components = top_level
-            allows_dynamic_operations = bool(
-                self.allow_dynamic_components and top_level_components)
+            requested_dynamic = (self.allow_dynamic_components(slot_request.connection_name, slot_type)
+                if callable(self.allow_dynamic_components) else self.allow_dynamic_components)
+            allows_dynamic_operations = bool(requested_dynamic and top_level_components)
             manager = ComponentManager(
                 factory=dynamic_root_loader,
                 activation_policy=slot_type.activation_policy,
@@ -396,7 +406,7 @@ class ComponentRuntimeBuilder:
         spec = record.subcomponent_spec
         return ComponentContext._create(instance=instance, params=params, spec=spec,
             subcomponents=subcomponents, clock_options=self.clock_options,
-            logger=self.logger, component_name=str(record.id),
+            logger=self.logger, component_name=record.name,
             component_reference=str(record.folder),
             plugin_type=plugin_info.get("PluginType", getattr(record, "plugin_type", "")),
             **self._context_options(record.folder))
@@ -415,7 +425,7 @@ class ComponentRuntimeBuilder:
             clock_options=self.clock_options,
             logger=self.logger,
             runtime=prepared.process,
-            component_name=str(record.id), component_reference=str(record.folder),
+            component_name=record.name, component_reference=str(record.folder),
             plugin_type=plugin_info.get("PluginType", getattr(record, "plugin_type", "")),
             **self._context_options(record.folder),
         )
@@ -478,16 +488,27 @@ class ComponentRuntimeBuilder:
                     slot_declaration=node.plugin_info["PluginType"],
                     rpp_home=self.data_manager.lm.rpp_home,
                     logger=self.logger,
-                    allow_dynamic_components=self.allow_dynamic_components,
+                    allow_dynamic_components=(self.allow_dynamic_components
+                        if isinstance(self.allow_dynamic_components, bool) else False),
                 )
                 self._prepared_components[str(node.record.folder)] = \
                     self._PreparedComponent(adapter_client, runtime)
 
-    @staticmethod
-    def _load_parameters(record, plugin_info):
+    def _load_parameters(self, record, plugin_info):
+        overrides = self._parameter_overrides.get(record.plugin_name)
+        metadata = plugin_info.get("PluginMetadata", {})
+        declarations = metadata.get("Parameters", {})
+        if overrides is not None:
+            if plugin_info["SourceLanguage"].strip().lower() != "python":
+                raise ValueError(
+                    f"Parameter overrides require a native Python plugin: {record.plugin_name}")
+            for name in overrides:
+                if name not in declarations:
+                    raise ValueError(
+                        f"Undeclared parameter override '{name}' for plugin '{record.plugin_name}'")
         with ParameterHandler(record.folder) as param_handler:
             loaded = param_handler.load_parameters_from_python_module()
-        metadata = plugin_info.get("PluginMetadata", {})
-        return ParameterHandler.resolve_params(
-            metadata.get("Parameters", {}), loaded
-        )
+        params = ParameterHandler.resolve_params(declarations, loaded)
+        if overrides is not None:
+            params.params.update(deepcopy(overrides))
+        return params

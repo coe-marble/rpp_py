@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+from functools import partial
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -225,8 +226,8 @@ class CppExternalComponentProcess(ExternalComponentProcess):
 
     _command = "rpp_component_server_cpp"
 
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(command=self.resolve_command(), **kwargs)
+    def __init__(self, *, command: str | None = None, **kwargs: Any) -> None:
+        super().__init__(command=command or self.resolve_command(), **kwargs)
 
     @property
     def command_args(self) -> list[str]:
@@ -341,6 +342,14 @@ class ExternalComponentProcessRegistry:
         if not normalized_language:
             raise ValueError("Component process language cannot be empty.")
         self._factories[normalized_language] = (factory, share_process)
+
+    def register_server(self, language: str, command: str) -> None:
+        """Register a server executable without launching it."""
+        if not language.strip() or not command.strip():
+            raise ValueError("External component server language and command are required")
+        process_type = (CppExternalComponentProcess if language.strip().lower() == "cpp"
+                        else ExternalComponentProcess)
+        self.register(language, partial(process_type, command=command), share_process=True)
 
     def create(self, language: str, **kwargs):
         normalized_language = language.strip().lower()

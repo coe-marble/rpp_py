@@ -18,6 +18,61 @@ from rpp_py.external_component_process import (
 from rpp_py.data_manager import DataManager
 
 
+@pytest.fixture
+def parameter_component(tmp_path):
+    folder = tmp_path / "component"
+    (folder / "params").mkdir(parents=True)
+    (folder / "params" / "parameters.py").write_text(
+        "class ComponentParameters:\n    value = [1]\n    other = 2\n", encoding="utf-8")
+    record = SimpleNamespace(folder=folder, plugin_name="example::Plugin")
+    info = {"SourceLanguage": "python", "PluginMetadata": {"Parameters": {
+        "value": {"type": "array", "default_value": []},
+        "other": {"type": "int", "default_value": 7},
+    }}}
+    return record, info
+
+
+def test_parameter_overrides_replace_workspace_values_without_sharing_mutable_values(parameter_component):
+    record, info = parameter_component
+    builder = ComponentRuntimeBuilder(data_manager=FakeDataManager(None))
+    overrides = {"example::Plugin": {"value": [42]}}
+    builder.set_parameter_overrides(overrides)
+    overrides["example::Plugin"]["value"].append(99)
+    first = builder._load_parameters(record, info)
+    assert first.get("value") == [42]
+    assert first.get("other") == 2
+    first.get("value").append(3)
+    assert builder._load_parameters(record, info).get("value") == [42]
+    builder.set_parameter_overrides({})
+    assert builder._load_parameters(record, info).get("value") == [1]
+    assert first.get("value") == [42, 3]
+
+
+def test_parameter_overrides_reject_undeclared_names_and_adapted_components(parameter_component):
+    record, info = parameter_component
+    builder = ComponentRuntimeBuilder(data_manager=FakeDataManager(None))
+    builder.set_parameter_overrides({"example::Plugin": {"missing": 42}})
+    with pytest.raises(ValueError, match="Undeclared parameter override 'missing'"):
+        builder._load_parameters(record, info)
+    builder.set_parameter_overrides({"example::Plugin": {"value": [42]}})
+    with pytest.raises(ValueError, match="require a native Python plugin"):
+        builder._load_parameters(record, info | {"SourceLanguage": "cpp"})
+
+
+@pytest.mark.parametrize("factory_kind", ["root", "slot"])
+def test_dynamic_factories_retain_their_parameter_overrides(
+        monkeypatch, parameter_component, factory_kind):
+    record, info = parameter_component
+    builder = ComponentRuntimeBuilder(data_manager=FakeDataManager(None))
+    builder.set_parameter_overrides({"example::Plugin": {"value": [42]}})
+    monkeypatch.setattr(ComponentRuntimeBuilder, "_build_root_context",
+        lambda self, *args: self._load_parameters(record, info))
+    factory = (builder._dynamic_root_loader() if factory_kind == "root" else
+        builder._context_options("script", allow_dynamic_components=True)["component_factory"])
+    builder.set_parameter_overrides({"example::Plugin": {"value": [99]}})
+    assert factory("component").get("value") == [42]
+
+
 class FakeDataManager:
     def __init__(self, description):
         self.description = description
@@ -64,7 +119,7 @@ def test_builder_propagates_dynamic_permission_to_native_subtrees(monkeypatch, d
 
     manager = FakeDataManager(None)
     manager.lm = object()
-    records = {path: ComponentRecord(id=path, name=path, plugin_type="fake-plugin-type",
+    records = {path: ComponentRecord(id="storage:" + path, name=path, plugin_type="fake-plugin-type",
         plugin_name="fake-plugin-name", library="fake", folder=path,
         subcomponent_spec={}, subcomponents={}) for path in ("/root", "/child")}
     records["/root"].subcomponent_spec = {"items": "Option[fake-plugin-type]"}
@@ -77,18 +132,46 @@ def test_builder_propagates_dynamic_permission_to_native_subtrees(monkeypatch, d
     builder._load_parameters = lambda *_: Parameters()
     runtime = builder.build_component_from_path("/root")
     context = runtime.get_context()
-    # Dynamic slot administration belongs only to composition roots (scripts
-    # and component servers), never to a component's own subcomponent slots.
+    # Root handles are fixed, while their child slots inherit the build policy.
     assert not runtime.allows_dynamic_components()
-    assert not context._slot("items")._dynamic
-    assert not context.get_subcomponent_context("items", "/child")._context._dynamic
+    assert context._slot("items")._dynamic is dynamic
+    assert context.get_subcomponent_context("items", "/child")._context._dynamic is dynamic
     runtime.close()
 
     validator = Mock(return_value=CallbackResult.failure("admission rejected"))
-    builder.registration_validators = {"/root": {"items": validator}}
+    builder.registration_validators = {"fake-plugin-type": {"/child": validator}}
     with pytest.raises(LifecycleError, match="admission rejected"):
         builder.build_component_from_path("/root")
     assert validator.call_count == 1
+
+
+@pytest.mark.parametrize("source_kind", ["path", "library", "description"])
+def test_script_requests_honor_parts_folder_for_every_source(source_kind):
+    from rpp_py.build_requests import LibraryScript, ScriptDescriptionPath, ScriptPath, ScriptRequest
+    description = SimpleNamespace(components={"vehicle": [{
+        "PluginName": "fake-plugin-name", "Id": "vehicle-id"}]},
+        spec={"vehicle": "fake-plugin-type"})
+    data = FakeDataManager(description)
+    data.get_script_description_path_from_library = lambda *_: "/workspace/script.json"
+    builder = ComponentRuntimeBuilder(data_manager=data)
+    builder._build_component_from_path = lambda path: ComponentContext(instance=path)
+    source = {"path": ScriptPath("/workspace/script.py"),
+              "library": LibraryScript("example", "script"),
+              "description": ScriptDescriptionPath("/workspace/script.json")}[source_kind]
+    runtime = builder.build_script(ScriptRequest(source, parts_folder="/alternate"))
+    assert runtime.get_context().get_subcomponent_context("vehicle").get_instance() == \
+        "/alternate/fake-plugin-name/vehicle-id"
+    runtime.close().require_success()
+
+
+def test_builder_registers_server_without_launching_a_process():
+    from unittest.mock import Mock
+    registry = ExternalComponentProcessRegistry()
+    registry.register_server = Mock()
+    builder = ComponentRuntimeBuilder(data_manager=FakeDataManager(None),
+                                      external_component_process_registry=registry)
+    builder.register_external_component_server("cpp", "/custom/component-server")
+    registry.register_server.assert_called_once_with("cpp", "/custom/component-server")
 
 
 def test_data_manager_loads_configuration_based_script_description(tmp_path: Path):

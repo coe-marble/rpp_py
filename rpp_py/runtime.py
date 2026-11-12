@@ -59,12 +59,12 @@ class _Runtime:
         return self._manager.close(timeout=timeout)
 
     def process_deactivations(self, *, timeout=None):
-        """Python has no deferred lifecycle queue; retain API parity as a no-op."""
-        return CallbackResult()
+        """Process queued self-deactivation requests throughout this tree."""
+        return self._context._process_deactivations(timeout=timeout)
 
     def allows_dynamic_components(self, slot_name=None):
         if slot_name is None:
-            return bool(self._context._dynamic)
+            return self._manager is not None and bool(self._manager._dynamic)
         return bool(self._context._slot(slot_name)._dynamic)
 
     def get_subcomponent_statuses(self, slot_name):
