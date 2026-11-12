@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rpp-py"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Python implementation of RPP plugin system"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2,<3",
     "pycapnp>=1.3,<3",
-    "rpp-common>=0.1,<0.2",
-    "rpp-orchestrator>=0.1,<0.2",
-    "rpp-plugin-registrator>=0.1,<0.2",
+    "rpp-common>=0.2,<0.3",
+    "rpp-orchestrator>=0.2,<0.3",
+    "rpp-plugin-registrator>=0.2,<0.3",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +23,9 @@ rpp_component_server_python = "rpp_py.cli.component_server:main"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "rpp_py.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["rpp_py", "rpp_py.*"]
