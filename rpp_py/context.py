@@ -1,4 +1,5 @@
 
+from contextlib import contextmanager
 from typing import Dict
 import weakref
 import uuid
@@ -437,3 +438,22 @@ class ComponentContext:
         """Run a callback under a named active subcomponent's slot guard."""
         return self._slot(slot_name).with_active(
             component_name, callback, expected_instance_id=expected_instance_id)
+
+    @contextmanager
+    def active_component(self, slot_name, component_name=None, *, expected_instance_id=None):
+        """Borrow an active child for one ``with`` scope.
+
+        Omitting component_name selects the current entry of a Single[T] or
+        Option[T] slot and yields None when it is inactive or unavailable.
+        List[T] slots require a component name.
+        """
+        slot = self._slot_types.get(slot_name)
+        if slot is None:
+            raise LifecycleError(f"Component slot {slot_name!r} not found")
+        manager = self._slot(slot_name)
+        if component_name is None:
+            with manager.active_selected(expected_instance_id=expected_instance_id) as instance:
+                yield instance
+            return
+        with manager.active(component_name, expected_instance_id=expected_instance_id) as instance:
+            yield instance

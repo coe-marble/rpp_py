@@ -91,7 +91,19 @@ class ComponentManager:
             entry = self._entries.get(self._selected)
             if entry is not None and entry.context is not None:
                 return entry.context
-            return next(iter(self.contexts()), None)
+        return next(iter(self.contexts()), None)
+
+    def _selected_entry(self):
+        with self._lock:
+            entry = self._entries.get(self._selected)
+            if entry is not None and entry.context is not None:
+                return entry
+            entries = list(self._entries.values())
+        for item in entries:
+            with item.condition:
+                if item.context is not None:
+                    return item
+        return None
 
     def activation_contexts(self):
         if self._policy is ActivationPolicy.EXCLUSIVE:
@@ -442,6 +454,32 @@ class ComponentManager:
     def active(self, name, *, expected_instance_id=None):
         """Borrow a component within a with block, including across await calls."""
         return self._borrow(name, expected_instance_id)
+
+    @contextmanager
+    def active_selected(self, *, expected_instance_id=None):
+        """Borrow the selected active entry of an exclusive slot, or yield None.
+
+        The selection and guarded-call admission happen while lifecycle mutation
+        is held back, so a switch cannot replace the selected entry before the
+        caller enters the scope. List slots have no selected active entry.
+        """
+        if self._policy is ActivationPolicy.MULTIPLE:
+            raise LifecycleError("A list slot requires a component name")
+        with self._mutation:
+            entry = self._selected_entry()
+            if entry is None:
+                yield None
+                return
+            with entry.condition:
+                if (expected_instance_id is not None and
+                        expected_instance_id != entry.instance_id):
+                    raise LifecycleError("Stale component instance ID")
+                available = entry.gate and entry.state is LifecycleState.ACTIVE
+            if not available:
+                yield None
+                return
+            with self._borrow(entry.name, expected_instance_id) as plugin:
+                yield plugin
 
     def with_active(self, name, callback, *, expected_instance_id=None):
         with self._borrow(name, expected_instance_id) as plugin:

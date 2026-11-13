@@ -37,6 +37,8 @@ def no_axis_overlap(candidate, registered):
 def test_static_slot_lifecycle_uses_runtime_and_context_views():
     runtime, context = root("Option[controllers::Controller]", [child("first"), child("second")])
     runtime.configure().require_success()
+    with context.active_component("controllers") as active:
+        assert active is None
     assert context.activate_subcomponents().success
     assert runtime.activate().success
 
@@ -57,11 +59,15 @@ def test_dynamic_slot_loads_and_switches_through_runtime(declaration):
     assert runtime.activate().success
     assert runtime.load_component("controllers", "second", "/second").success
     assert runtime.configure_component("controllers", "second").success
+    with context.active_component("controllers") as active:
+        assert active is context.get_subcomponent_instance("controllers")
     assert runtime.switch_component("controllers", "first", "second").success
 
     selected = context.get_subcomponent_context("controllers")
     assert selected.get_instance() is context.get_subcomponent_instance("controllers")
     assert selected.is_active()
+    with context.active_component("controllers") as active:
+        assert active is selected.get_instance()
     assert runtime.unload_component("controllers", "first").success
 
 
@@ -72,6 +78,9 @@ def test_list_slot_requires_a_name_for_single_access_and_enumerates_lazily():
 
     with pytest.raises(LifecycleError, match="requires a component name"):
         context.get_subcomponent_instance("controllers")
+    with pytest.raises(LifecycleError, match="requires a component name"):
+        with context.active_component("controllers"):
+            pass
     assert len(list(context.enumerate_subcomponent_instances("controllers"))) == 2
     assert len(list(context.enumerate_subcomponent_contexts("controllers"))) == 2
 
