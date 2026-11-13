@@ -1,0 +1,10 @@
+{
+    "Id": "f9c33ed9-6472-4426-b643-ae99db4fbb7b",
+    "Name": "saved_leaf",
+    "PluginType": "rpp_testing::MotionController2D",
+    "PluginName": "test_lib::ComponentPluginSimplePy",
+    "Library": "test_lib",
+    "SubcomponentSpec": {},
+    "Subcomponents": {},
+    "ParentComponentInfo": null
+}

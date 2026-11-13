@@ -1,0 +1,14 @@
+{
+    "Id": "11111111-0000-4000-8000-000000000001",
+    "Name": "Fin 1",
+    "LinkedComponentId": "f9c33ed9-6472-4426-b643-ae99db4fbb7b",
+    "LinkedComponentWorkspace": "repro",
+    "ParentComponentInfo": {
+        "Id": "7bfa9573-ed97-425e-be6a-4334b40cb404",
+        "PluginType": "rpp_testing::MotionController2D",
+        "PluginName": "test_lib::ComponentPluginComplexPy",
+        "SlotName": "ctl_main",
+        "Library": "test_lib",
+        "IsLinked": false
+    }
+}
