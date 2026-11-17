@@ -30,6 +30,8 @@ class DataManager:
 
     def load_component_info(self, component_path: str) -> ComponentRecord | LinkedComponentRecord:
         description_path = Workspace.part_description_path(Path(component_path))
+        if description_path is None:
+            raise FileNotFoundError(f"Component description not found in: {component_path}")
         with open(description_path, 'r', encoding='utf-8') as description_file:
             description_json = json.load(description_file)
             if "LinkedComponentId" in description_json:
