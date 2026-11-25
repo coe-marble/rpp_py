@@ -10,7 +10,7 @@ from rpp_py.component_manager import ComponentManager
 from rpp_py.clock import clock_factory, Clock
 from rpp_py.logger import RppLogger
 from rpp_py.parameter_handler import Parameters
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError, LifecycleState
+from rpp_py.lifecycle import CallbackResult, LifecycleError, LifecycleState
 from rpp_py.plugin import Plugin
 
 class SubcomponentContext:
@@ -273,34 +273,20 @@ class ComponentContext:
         self._tree_active = True
         return result
 
-    def _deactivate(self) -> DeactivationResult:
-        """Stop parent before children; export root state only if all succeeded."""
-        errors = []
+    def _deactivate(self) -> CallbackResult:
         self._tree_active = False
-        result = DeactivationResult()
-        try:
-            if self._runtime is not None:
-                result = self._runtime.deactivate()
-                if not isinstance(result, DeactivationResult):
-                    raise LifecycleError("remote deactivate must return DeactivationResult")
-                Plugin._require_callback_result(result.result, "remote deactivate")
-                self._activation_outstanding = False
-                with self._deactivation_lock:
-                    self._deactivation_pending = False
-                return result
-            if self._instance is not None and self._activation_outstanding:
-                result = self._instance.deactivate_state()
-                self._activation_outstanding = False
-        except Exception as error:
-            errors.append(error)
-        if errors:
-            for error in errors[1:]:
-                self._logger.error(f"Additional component deactivation failure: {error!r}")
-            raise errors[0]
-        with self._deactivation_lock:
-            self._deactivation_pending = False
+        if self._runtime is not None:
+            result = self._runtime.deactivate()
+            Plugin._require_callback_result(result, "remote deactivate")
+        elif self._instance is not None and self._activation_outstanding:
+            result = self._instance.deactivate_state()
+        else:
+            result = CallbackResult()
+        if result.success:
+            self._activation_outstanding = False
+            with self._deactivation_lock:
+                self._deactivation_pending = False
         return result
-
 
     def get_clock(self) -> Clock:
         return self._clock
@@ -333,7 +319,7 @@ class ComponentContext:
             try:
                 manager = self._owning_manager()
                 first_error = manager.deactivate(self._owner_name, timeout=timeout,
-                                                 _context=self).result
+                                                 _context=self)
             except Exception as error:
                 first_error = CallbackResult.failure(f"Self-deactivation failed: {error}")
             if not first_error.success:
@@ -417,7 +403,7 @@ class ComponentContext:
         except Exception as error:
             for manager, name in reversed(activated):
                 try:
-                    manager.deactivate(name).result.require_success(
+                    manager.deactivate(name).require_success(
                         "deactivate rolled-back subcomponent")
                 except Exception as rollback_error:
                     self._logger.error(f"Component activation rollback failed: {rollback_error!r}")
@@ -428,16 +414,25 @@ class ComponentContext:
         first_failure = CallbackResult()
         for manager in reversed(list(self._slots.values())):
             for child in reversed(manager.deactivation_contexts()):
-                result = manager.deactivate(child._owner_name, timeout=timeout).result
+                result = manager.deactivate(child._owner_name, timeout=timeout)
                 if not result.success and first_failure.success:
                     first_failure = result
         return first_failure
 
     def with_active_component(self, slot_name, component_name, callback, *,
                               expected_instance_id=None):
-        """Run a callback under a named active subcomponent's slot guard."""
-        return self._slot(slot_name).with_active(
-            component_name, callback, expected_instance_id=expected_instance_id)
+        """Return (success, value) under a child's guard; failure returns (False, None).
+
+        An empty name selects an exclusive slot's current child. Unavailable or
+        stale children, unknown slots, released contexts, and callback exceptions
+        return failure. Callback side effects are not rolled back.
+        """
+        try:
+            self._ensure_attached()
+            return self._slot(slot_name).with_active(
+                component_name, callback, expected_instance_id=expected_instance_id)
+        except Exception:
+            return False, None
 
     @contextmanager
     def active_component(self, slot_name, component_name=None, *, expected_instance_id=None):

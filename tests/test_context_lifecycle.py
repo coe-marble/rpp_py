@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from rpp_py.context import ComponentContext
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError
 from rpp_py.plugin import Plugin
 from rpp_py.runtime import ComponentRuntime
 
@@ -132,7 +132,7 @@ def test_runtime_does_not_implicitly_activate_or_deactivate_subcomponents():
     assert events == [("activate", "parent"), ("activate", "first"),
                       ("activate", "second")]
 
-    assert runtime.deactivate().result.success
+    assert runtime.deactivate().success
     assert context.deactivate_subcomponents().success
     assert events[-3:] == [("deactivate", "parent"), ("deactivate", "second"),
                            ("deactivate", "first")]
@@ -166,21 +166,20 @@ def test_runtime_exports_only_its_own_handover_state():
             return CallbackResult()
 
         def on_deactivate(self):
-            return DeactivationResult(state=self.estimate)
+            return CallbackResult()
 
     runtime = ComponentRuntime(ComponentContext(instance=Stateful()))
     runtime.configure().require_success()
     assert runtime.activate(Estimate([1.0])).success
     stopped = runtime.deactivate()
-    assert stopped.result.success
-    assert stopped.state.position == [1.0]
+    assert stopped.success
 
 
 def test_adapted_context_forwards_lifecycle_through_runtime():
     external = Mock(
         configure=Mock(return_value=CallbackResult()),
         activate=Mock(return_value=CallbackResult()),
-        deactivate=Mock(return_value=DeactivationResult()),
+        deactivate=Mock(return_value=CallbackResult()),
         cleanup=Mock(return_value=CallbackResult()))
     plugin = Plugin()
     plugin.on_configure = Mock()
@@ -188,7 +187,7 @@ def test_adapted_context_forwards_lifecycle_through_runtime():
 
     assert runtime.configure().success
     assert runtime.activate().success
-    assert runtime.deactivate().result.success
+    assert runtime.deactivate().success
     assert runtime.cleanup().success
     external.configure.assert_called_once_with()
     external.activate.assert_called_once_with(None)
@@ -233,5 +232,5 @@ def test_empty_runtime_can_complete_a_lifecycle():
     runtime = ComponentRuntime(ComponentContext())
     assert runtime.configure().success
     assert runtime.activate().success
-    assert runtime.deactivate().result.success
+    assert runtime.deactivate().success
     assert runtime.cleanup().success

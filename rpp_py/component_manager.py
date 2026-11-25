@@ -7,7 +7,7 @@ import inspect
 from threading import Condition, RLock, get_ident
 
 from rpp_py.lifecycle import (
-    CallbackResult, ComponentInfo, DeactivationResult, LifecycleError, LifecycleState,
+    CallbackResult, ComponentInfo, LifecycleError, LifecycleState,
 )
 from rpp_py.component_slots import ActivationPolicy
 
@@ -21,11 +21,11 @@ def _slot_operation(method):
             with entry.condition:
                 if entry.callers.get(get_ident()):
                     result = CallbackResult.failure("Cannot manage a slot from inside its guarded call")
-                    return DeactivationResult(result) if method.__name__ == "deactivate" else result
+                    return result
         with self._mutation:
             if self._validating:
                 result = CallbackResult.failure("Cannot mutate a slot from its registration validator")
-                return DeactivationResult(result) if method.__name__ == "deactivate" else result
+                return result
             return method(self, *args, **kwargs)
     return serialized
 
@@ -343,36 +343,28 @@ class ComponentManager:
             return self._finish(entry, LifecycleState.ACTIVE if result.success else LifecycleState.ERROR, result)
 
     def _stop(self, entry):
-        try:
-            result = entry.context._deactivate()
-            if not isinstance(result, DeactivationResult):
-                raise LifecycleError("deactivate must return DeactivationResult")
-            if result.result.success:
-                entry.may_be_active = False
-            return result
-        except Exception as error:
-            return DeactivationResult(CallbackResult.failure(f"deactivate failed: {error}"))
+        result = self._capture("deactivate", entry.context._deactivate)
+        if result.success:
+            entry.may_be_active = False
+        return result
 
     @_slot_operation
-    def deactivate(self, name, *, timeout=None, _context=None) -> DeactivationResult:
+    def deactivate(self, name, *, timeout=None, _context=None) -> CallbackResult:
         entry = self._entry(name)
         if _context is not None and entry.context is not _context:
-            return DeactivationResult(CallbackResult.failure("Stale component context generation"))
+            return CallbackResult.failure("Stale component context generation")
         with entry.operation:
             with entry.condition:
                 if entry.state is LifecycleState.INACTIVE and entry.transition is None:
-                    return DeactivationResult()
+                    return CallbackResult()
                 if entry.state is LifecycleState.ERROR and not entry.may_be_active:
-                    return DeactivationResult(self._invalid(entry,
-                        "Failed configuration requires cleanup before reconfiguration"))
+                    return self._invalid(entry, "Failed configuration requires cleanup before reconfiguration")
             failure = self._begin(entry, "deactivate", {LifecycleState.ACTIVE, LifecycleState.ERROR})
             if failure is not None:
-                return DeactivationResult(failure)
+                return failure
             drained = self._drain(entry, timeout)
-            result = self._stop(entry) if drained.success else DeactivationResult(drained)
-            self._finish(entry, LifecycleState.INACTIVE if result.result.success else LifecycleState.ERROR,
-                         result.result)
-            return result if result.result.success else DeactivationResult(result.result)
+            result = self._stop(entry) if drained.success else drained
+            return self._finish(entry, LifecycleState.INACTIVE if result.success else LifecycleState.ERROR, result)
 
     @_slot_operation
     def cleanup(self, name, *, _context=None) -> CallbackResult:
@@ -409,7 +401,7 @@ class ComponentManager:
             result = self._drain(entry, timeout)
             if result.success and entry.context is not None:
                 if entry.may_be_active:
-                    result = self._stop(entry).result
+                    result = self._stop(entry)
                 if result.success:
                     result = self._capture("deactivate descendants",
                         lambda: entry.context._deactivate_descendants_for_shutdown(timeout=timeout))
@@ -482,65 +474,35 @@ class ComponentManager:
                 yield plugin
 
     def with_active(self, name, callback, *, expected_instance_id=None):
-        with self._borrow(name, expected_instance_id) as plugin:
-            result = callback(plugin)
-            if inspect.isawaitable(result):
-                if inspect.iscoroutine(result):
-                    result.close()
-                raise LifecycleError("Use an active() scope while awaiting component methods")
-            if result is plugin:
-                raise LifecycleError("Managed plugin references cannot escape a guarded call")
-            return result
+        """Return (success, value); unavailable access or callback exceptions return (False, None).
+
+        A successful callback returning None produces (True, None). Callbacks
+        must be synchronous and return owned values. Side effects are not rolled back.
+        """
+        try:
+            guard = (self._borrow(name, expected_instance_id) if name else
+                     self.active_selected(expected_instance_id=expected_instance_id))
+            with guard as plugin:
+                if plugin is None:
+                    return False, None
+                result = callback(plugin)
+                if inspect.isawaitable(result):
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    return False, None
+                if result is plugin:
+                    return False, None
+                return True, result
+        except Exception:
+            return False, None
 
     @_slot_operation
-    def switch_components(self, source, target, *, transfer_state=True, timeout=None) -> CallbackResult:
-        if not self._dynamic:
-            return CallbackResult.failure("Dynamic component modification is disabled")
-        if source == target:
-            return CallbackResult.failure("Switch source and target must differ")
-        first, second = sorted((self._entry(source), self._entry(target)), key=lambda e: e.name)
-        with first.operation, second.operation:
-            for entry in (first, second):
-                with entry.condition:
-                    if entry.callers.get(get_ident()):
-                        return CallbackResult.failure("Cannot switch from inside a guarded call")
-            if self.get_state(source) is not LifecycleState.ACTIVE:
-                return CallbackResult.failure("Switch source must be active")
-            target_entry = self._entry(target)
-            if target_entry.state is LifecycleState.UNLOADED:
-                loaded = self.load(target)
-                if not loaded.success:
-                    return loaded
-            if target_entry.state is LifecycleState.UNCONFIGURED:
-                configured = self.configure(target)
-                if not configured.success:
-                    return configured
-            if target_entry.state is not LifecycleState.INACTIVE:
-                return CallbackResult.failure("Switch target must be inactive")
-            if transfer_state:
-                source_type = self._entry(source).context._instance.HANDOVER_STATE_TYPE
-                target_type = target_entry.context._instance.HANDOVER_STATE_TYPE
-                if source_type is not target_type:
-                    return CallbackResult.failure("Incompatible handover state types")
-            stopped = self.deactivate(source, timeout=timeout)
-            if not stopped.result.success:
-                return stopped.result
-            return self.activate(target, stopped.state if transfer_state else None)
-
-    @_slot_operation
-    def reload(self, name, *, transfer_state=False, timeout=None, refresh=None) -> CallbackResult:
+    def reload(self, name, state=None, *, timeout=None, refresh=None) -> CallbackResult:
         if not self._dynamic:
             return CallbackResult.failure("Dynamic component modification is disabled")
         entry = self._entry(name)
         with entry.operation:
             was_active = entry.state is LifecycleState.ACTIVE
-            snapshot = None
-            if was_active:
-                stopped = self.deactivate(name, timeout=timeout)
-                if not stopped.result.success:
-                    return stopped.result
-                if transfer_state:
-                    snapshot = stopped.state
             unloaded = self.unload(name, timeout=timeout)
             if not unloaded.success:
                 return unloaded
@@ -553,7 +515,9 @@ class ComponentManager:
                 result = action()
                 if not result.success:
                     return result
-            return self.activate(name, snapshot) if was_active else CallbackResult()
+            if was_active:
+                return self.activate(name, state)
+            return CallbackResult()
 
     @_slot_operation
     def close(self, *, timeout=None) -> CallbackResult:

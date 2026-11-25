@@ -171,8 +171,7 @@ class ExternalComponentProcess:
     def deactivate_component(self, name):
         if not self._started:
             raise RuntimeError("Component process is not prepared")
-        return self._executor.call(self._runtime_client.deactivate_component(
-            name, adapter=self._adapter_for(name)))
+        return self._executor.call(self._runtime_client.deactivate_component(name))
 
     def _adapter_for(self, connection_name):
         for adapter, component in self.components:

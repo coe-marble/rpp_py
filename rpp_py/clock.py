@@ -1,4 +1,21 @@
+import math
 import time
+
+
+_MAX_TIMESTAMP_NS = (1 << 64) - 1
+
+
+def _checked_nanoseconds(nanoseconds: int) -> int:
+    if not 0 <= nanoseconds <= _MAX_TIMESTAMP_NS:
+        raise ValueError("Clock time must fit unsigned 64-bit nanoseconds")
+    return nanoseconds
+
+
+def _seconds_to_nanoseconds(seconds: float) -> int:
+    nanoseconds = seconds * 1e9
+    if not math.isfinite(nanoseconds) or nanoseconds < 0:
+        raise ValueError("Clock time must fit unsigned 64-bit nanoseconds")
+    return _checked_nanoseconds(int(nanoseconds))
 
 
 class ClockOptions:
@@ -16,7 +33,8 @@ class Clock:
     def now_seconds(self):
         raise NotImplementedError("Subclasses should implement this method.")
 
-    def now_nanoseconds(self):
+    def now_nanoseconds(self) -> int:
+        """Return unsigned 64-bit nanoseconds in this clock's domain."""
         raise NotImplementedError("Subclasses should implement this method.")
 
 class RealtimeClock(Clock):
@@ -37,31 +55,32 @@ class RealtimeClock(Clock):
         else:
             return time.time()
 
-    def now_nanoseconds(self):
+    def now_nanoseconds(self) -> int:
         if self.use_ros_time:
-            return self._ros_clock.now().nanoseconds
+            return _checked_nanoseconds(self._ros_clock.now().nanoseconds)
         else:
-            return int(time.time() * 1e9)
+            return _checked_nanoseconds(time.time_ns())
 
 
 
 class MockClock(Clock):
     def __init__(self, clock_options=None):
         super().__init__(clock_options)
-        self.current_time = self.initial_time
+        self.set_time(self.initial_time)
 
     def set_time(self, new_time):
+        _seconds_to_nanoseconds(new_time)
         self.current_time = new_time
 
     def now_seconds(self):
         return self.current_time
 
     def elapse(self, dt):
-        self.current_time += dt
+        self.set_time(self.current_time + dt)
         return self.current_time
 
-    def now_nanoseconds(self):
-        return int(self.current_time * 1e9)
+    def now_nanoseconds(self) -> int:
+        return _seconds_to_nanoseconds(self.current_time)
 
 
 def clock_factory(clock_options=None):

@@ -1,5 +1,6 @@
 """Native lifecycle callbacks and typed, owned handover values."""
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 import importlib
 import importlib.util
@@ -38,7 +39,7 @@ def localizer_type(api):
             return api.CallbackResult()
 
         def on_deactivate(self):
-            return api.DeactivationResult(state=self.estimate)
+            return api.CallbackResult()
 
     return Localizer
 
@@ -47,7 +48,8 @@ def test_snapshot_is_owned_and_can_activate_another_implementation():
     api = lifecycle_contract()
     Localizer = localizer_type(api)
     first = Localizer([1.0, 2.0])
-    snapshot = first.deactivate_state().state
+    snapshot = deepcopy(first.estimate)
+    assert first.deactivate_state().success
     first.estimate.position.append(99.0)
     del first
     class AlternativeLocalizer(Localizer):
@@ -79,11 +81,10 @@ def test_incompatible_state_is_rejected_before_callback():
     plugin.on_activate.assert_not_called()
 
 
-def test_failed_deactivation_cannot_export_state():
+def test_failed_deactivation_reports_failure():
     api = lifecycle_contract()
     plugin = localizer_type(api)([1.0])
-    plugin.on_deactivate = Mock(return_value=api.DeactivationResult(
-        api.CallbackResult.failure("still updating"), plugin.estimate))
+    plugin.on_deactivate = Mock(return_value=api.CallbackResult.failure("still updating"))
     with pytest.raises(api.LifecycleError, match="still updating"):
         plugin.deactivate_state()
 
@@ -101,7 +102,7 @@ def test_stateless_callbacks_receive_no_state_argument():
     plugin.on_deactivate = Mock(return_value=api.CallbackResult())
 
     assert plugin.activate_state().success
-    assert plugin.deactivate_state().state is None
+    assert plugin.deactivate_state().success
 
     plugin.on_activate.assert_called_once_with()
     plugin.on_deactivate.assert_called_once_with()
@@ -116,21 +117,11 @@ def test_dispatch_reports_callback_errors(phase, kind):
         callback = Mock(side_effect=RuntimeError("callback exploded"))
     else:
         result = None if kind == "missing-result" else api.CallbackResult.failure("rejected")
-        if phase == "deactivate" and result is not None:
-            result = api.DeactivationResult(result)
         callback = Mock(return_value=result)
     setattr(plugin, f"on_{phase}", callback)
 
     with pytest.raises(api.LifecycleError, match=f"on_{phase}"):
         getattr(plugin, f"{phase}_state")()
-
-
-def test_wrong_export_type_is_rejected():
-    api = lifecycle_contract()
-    plugin = localizer_type(api)([])
-    plugin.on_deactivate = Mock(return_value=api.DeactivationResult(state="wrong"))
-    with pytest.raises(TypeError, match="Expected handover state Estimate"):
-        plugin.deactivate_state()
 
 
 def test_configure_visits_children_before_parent():

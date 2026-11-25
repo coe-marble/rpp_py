@@ -1,7 +1,7 @@
 from __future__ import annotations
 from copy import deepcopy
 
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError
 from rpp_common.parameter_description import ParameterDescription
 
 
@@ -65,16 +65,10 @@ class Plugin:
         self._require_callback_result(result, "on_activate")
         return result
 
-    def deactivate_state(self) -> DeactivationResult:
+    def deactivate_state(self) -> CallbackResult:
         result = self._invoke_lifecycle("on_deactivate", self.on_deactivate)
-        if self.HANDOVER_STATE_TYPE is None:
-            self._require_callback_result(result, "on_deactivate")
-            return DeactivationResult(result)
-        if not isinstance(result, DeactivationResult):
-            raise LifecycleError("on_deactivate must return DeactivationResult")
-        self._require_callback_result(result.result, "on_deactivate")
-        self._validate_state(result.state)
-        return DeactivationResult(result.result, deepcopy(result.state))
+        self._require_callback_result(result, "on_deactivate")
+        return result
 
     def reset(self):
         pass
