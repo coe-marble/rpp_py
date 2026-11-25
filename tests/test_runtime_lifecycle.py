@@ -1,6 +1,7 @@
 """Host-slot status and protocol compatibility behavior."""
 
 import asyncio
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -58,7 +59,7 @@ def test_hosted_slot_manager_controls_full_native_lifecycle_happy_path():
     assert manager.configure("root").success
     assert manager.get_state("root") is LifecycleState.INACTIVE
     assert manager.activate("root").success
-    assert manager.deactivate("root").result.success
+    assert manager.deactivate("root").success
     assert manager.cleanup("root").success
     assert events == [("configure", "root"), ("cleanup", "root")]
 
@@ -74,3 +75,87 @@ def test_client_rejects_incompatible_protocol_and_clears_connection(monkeypatch)
         asyncio.run(client.connect(context))
     assert client._client is None
     assert client._context is None
+
+
+@pytest.mark.parametrize("operation,wire_method,stateful", [
+    ("configure_instances", "configureComponent", False),
+    ("cleanup_instances", "cleanupComponent", False),
+    ("activate_instances", "activateComponent", True),
+    ("deactivate_instances", "deactivateComponent", False),
+    ("unload_instances", "unloadComponent", False),
+    ("reload_instances", "reloadComponent", True),
+])
+def test_batch_client_preserves_id_and_handover_order(operation, wire_method, stateful):
+    response = SimpleNamespace(result=SimpleNamespace(success=True, message=""))
+    invoke = AsyncMock(return_value=response)
+    client = PluginRuntimeClient()
+    client._client = SimpleNamespace(**{wire_method: invoke})
+    instance_ids = ["first-instance", "second-instance"]
+    states = [object(), object()]
+    arguments = [instance_ids, states] if stateful else [instance_ids]
+    result = asyncio.run(getattr(client, operation)(*arguments))
+    assert result.success
+    expected = {"instanceIds": instance_ids}
+    if stateful:
+        expected["handoverStates"] = states
+    invoke.assert_awaited_once_with(**expected)
+
+
+@pytest.mark.parametrize("operation,wire_method", [
+    ("unload_instances", "unloadComponent"),
+    ("reload_instances", "reloadComponent"),
+])
+def test_partial_batch_failure_invalidates_cached_instance_ids(operation, wire_method):
+    response = SimpleNamespace(result=SimpleNamespace(success=False, message="second entry failed"))
+    client = PluginRuntimeClient()
+    client._client = SimpleNamespace(**{wire_method: AsyncMock(return_value=response)})
+    client._component_ids_by_connection = {"slot": "first-instance"}
+    result = asyncio.run(getattr(client, operation)(["first-instance", "second-instance"]))
+    assert not result.success
+    assert client._component_ids_by_connection == {}
+
+
+def test_rpc_switch_decodes_each_state_before_stopping_outgoing_components(monkeypatch):
+    @dataclass
+    class Snapshot:
+        name: str
+
+    class StatefulRecorder(Plugin):
+        HANDOVER_STATE_TYPE = Snapshot
+
+        def __init__(self):
+            self.received = None
+
+        def on_activate(self, state=None):
+            self.received = state
+            return CallbackResult()
+
+    manager = ComponentManager()
+    plugins = {name: StatefulRecorder() for name in ("outgoing", "first", "second")}
+    for name, plugin in plugins.items():
+        context = ComponentContext._create(instance=plugin, component_name=name)
+        manager.adopt(name, context, name, initial=True).require_success()
+        manager.configure(name).require_success()
+    manager.activate("outgoing").require_success()
+    adapter = Mock()
+    adapter.decode_lifecycle_state__.side_effect = (
+        lambda schema_id, payload: (CallbackResult(), Snapshot(payload)))
+    slot = HostedSlot(adapter, manager, lambda *_: CallbackResult(), CallbackResult)
+    owner = PluginRuntimeServer(slots={"controllers": slot})
+    monkeypatch.setattr(RuntimeConstants, "get_capnp_schema", lambda: SimpleNamespace(
+        PluginRuntime=SimpleNamespace(Server=object), AdapterInfo=object))
+    server = owner._init_obj_of_server_class(owner._create_server_class()())
+    context = SimpleNamespace(results=SimpleNamespace(result=SimpleNamespace()))
+    ids = {name: manager.get_info(name).instance_id for name in plugins}
+    states = [SimpleNamespace(schemaId=1, payload="first-state"),
+              SimpleNamespace(schemaId=1, payload="second-state")]
+    try:
+        asyncio.run(server.switchComponents(
+            deactivate=[ids["outgoing"]], activate=[ids["first"], ids["second"]],
+            handoverStates=states, _context=context))
+        assert context.results.result.success
+        assert manager.get_state("outgoing") is LifecycleState.INACTIVE
+        assert plugins["first"].received == Snapshot("first-state")
+        assert plugins["second"].received == Snapshot("second-state")
+    finally:
+        manager.close()

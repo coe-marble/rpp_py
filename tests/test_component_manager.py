@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError, LifecycleState
+from rpp_py.lifecycle import CallbackResult, LifecycleError, LifecycleState
 from rpp_py.context import ComponentContext
 from rpp_py.plugin import Plugin
 from rpp_py.component_manager import ComponentManager
@@ -39,8 +39,7 @@ class Localizer(Plugin):
 
     def on_deactivate(self):
         self.events.append("deactivate")
-        return DeactivationResult(CallbackResult.failure("still active") if self.reject == "deactivate"
-                                  else CallbackResult(), self.estimate)
+        return CallbackResult.failure("still active") if self.reject == "deactivate" else CallbackResult()
 
     def on_cleanup(self):
         self.events.append("cleanup")
@@ -131,17 +130,16 @@ def test_normal_flow_duplicate_activation_and_generation(setup_manager):
     instance_id = initial_info.instance_id
     assert manager.activate("localizer").success
     assert events == ["configure", "activate"]
-    assert manager.with_active("localizer", lambda plugin: plugin.estimate.position) == [1.0]
-    assert manager.deactivate("localizer").state.position == [1.0]
-    assert manager.deactivate("localizer").state is None
+    assert manager.with_active("localizer", lambda plugin: plugin.estimate.position) == (True, [1.0])
+    assert manager.deactivate("localizer").success
+    assert manager.get_state("localizer") is LifecycleState.INACTIVE
     assert manager.cleanup("localizer").success
     assert manager.unload("localizer").success
     assert manager.get_state("localizer") is LifecycleState.UNLOADED
     ready(manager)
     assert manager.get_info("localizer").generation > generation
-    with pytest.raises(LifecycleError, match="instance ID"):
-        manager.with_active("localizer", lambda plugin: None,
-                            expected_instance_id=instance_id)
+    assert manager.with_active("localizer", lambda plugin: None,
+                               expected_instance_id=instance_id) == (False, None)
     assert builder.build_component_from_path.call_count == 2
 
 
@@ -151,8 +149,7 @@ def test_invalid_transition_keeps_actual_state_and_inactive_calls_are_rejected(s
     assert not manager.activate("localizer").success
     assert manager.get_state("localizer") is LifecycleState.UNCONFIGURED
     assert events == []
-    with pytest.raises(LifecycleError, match="active"):
-        manager.with_active("localizer", lambda plugin: None)
+    assert manager.with_active("localizer", lambda plugin: None) == (False, None)
 
 
 def test_failed_callback_is_visible_and_cannot_affect_another_entry(setup_manager):
@@ -164,7 +161,7 @@ def test_failed_callback_is_visible_and_cannot_affect_another_entry(setup_manage
     assert not result.success and "configuration rejected" in result.message
     assert manager.get_state("failed") is LifecycleState.ERROR
     assert manager.get_state("other") is LifecycleState.ACTIVE
-    assert not manager.deactivate("failed").result.success
+    assert not manager.deactivate("failed").success
     assert manager.get_state("failed") is LifecycleState.ERROR
     assert manager.unload("failed").success
     assert manager.get_state("other") is LifecycleState.ACTIVE
@@ -196,8 +193,8 @@ def test_deactivate_closes_gate_drains_existing_calls_and_keeps_queries_responsi
         result = manager.deactivate("localizer", timeout=0.5)
         with changed:
             state["done"] = True
-            if not result.result.success:
-                errors.append(result.result.message)
+            if not result.success:
+                errors.append(result.message)
             changed.notify_all()
 
     caller = Thread(target=lambda: manager.with_active("localizer", call))
@@ -212,8 +209,7 @@ def test_deactivate_closes_gate_drains_existing_calls_and_keeps_queries_responsi
             assert not state["done"]
         assert manager.get_info("localizer").transition == "deactivate"
         assert "deactivate" not in events
-        with pytest.raises(LifecycleError):
-            manager.with_active("localizer", lambda plugin: None)
+        assert manager.with_active("localizer", lambda plugin: None) == (False, None)
     finally:
         with changed:
             state["release"] = True
@@ -253,38 +249,52 @@ def test_drain_timeout_retains_instance_and_allows_safe_retry(setup_manager):
     assert manager.unload("localizer").success
 
 
-def test_switch_copies_handover_and_failed_target_keeps_source_inactive(setup_manager):
-    manager, plugins, _, _ = setup_manager
-    ready(manager, "ekf")
-    assert manager.load("particle", component="/workspace/particle").success
-    assert manager.switch_components("ekf", "particle", transfer_state=True).success
-    plugins[0].estimate.position.append(99.0)
-    assert manager.with_active("particle", lambda plugin: plugin.estimate.position) == [1.0]
-    plugins[0].reject = "activate"
-    assert not manager.switch_components("particle", "ekf", transfer_state=True).success
-    assert manager.get_state("particle") is LifecycleState.INACTIVE
-    assert manager.get_state("ekf") is LifecycleState.ERROR
-
-
-def test_reload_uses_new_context_and_preserves_state_only_when_requested(setup_manager):
+def test_reload_preserves_active_status_and_uses_provided_state(setup_manager):
     manager, plugins, _, _ = setup_manager
     ready(manager)
     plugins[0].estimate.position = [7.0]
     first_generation = manager.get_info("localizer").generation
-    assert manager.reload("localizer", transfer_state=True).success
+    assert manager.reload("localizer", Estimate([8.0])).success
     assert len(plugins) == 2
-    assert manager.get_info("localizer").generation > first_generation
-    assert manager.with_active("localizer", lambda plugin: plugin.estimate.position) == [7.0]
+    assert manager.get_state("localizer") is LifecycleState.ACTIVE
+    assert plugins[-1].estimate.position == [8.0]
+    assert manager.deactivate("localizer").success
     assert manager.reload("localizer").success
-    assert manager.with_active("localizer", lambda plugin: plugin.estimate.position) == [1.0]
+    assert len(plugins) == 3
+    assert manager.get_info("localizer").generation > first_generation
+    assert manager.get_state("localizer") is LifecycleState.INACTIVE
+    assert plugins[-1].estimate.position == [1.0]
 
 
 def test_management_from_inside_a_guarded_call_is_rejected_without_deadlocking(setup_manager):
     manager, _, _, _ = setup_manager
     ready(manager)
-    result = manager.with_active("localizer", lambda _: manager.deactivate("localizer"))
-    assert not result.result.success
+    success, result = manager.with_active("localizer", lambda _: manager.deactivate("localizer"))
+    assert success
+    assert not result.success
     assert manager.get_state("localizer") is LifecycleState.ACTIVE
+
+
+def test_guarded_call_returns_success_and_value_and_releases_guard_on_exception(setup_manager):
+    manager, _, _, _ = setup_manager
+    ready(manager)
+    assert manager.with_active("localizer", lambda _: None) == (True, None)
+    assert manager.with_active("localizer", lambda _: False) == (True, False)
+    assert manager.with_active("missing", lambda _: pytest.fail("Callback must not run")) == (False, None)
+    assert manager.with_active("", lambda _: pytest.fail("List slot needs a name")) == (False, None)
+
+    def fail(_):
+        raise ValueError("Callback failed")
+
+    assert manager.with_active("localizer", fail) == (False, None)
+    assert manager.with_active("localizer", lambda plugin: plugin) == (False, None)
+
+    async def pending(_):
+        return 1
+
+    assert manager.with_active("localizer", pending) == (False, None)
+    assert manager.get_info("localizer").in_flight == 0
+    assert manager.deactivate("localizer").success
 
 
 def test_native_sync_creates_no_loop(setup_manager, monkeypatch):
@@ -330,7 +340,7 @@ def test_async_guard_holds_access_until_the_awaited_callback_finishes(setup_mana
         assert not stopped.done()
         release.set()
         assert await task == [1.0]
-        assert (await stopped).result.success
+        assert (await stopped).success
 
     asyncio.run(exercise())
 

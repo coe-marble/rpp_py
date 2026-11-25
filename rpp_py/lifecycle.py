@@ -2,10 +2,6 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, TypeVar
-
-
-State = TypeVar("State")
 
 
 class LifecycleState(str, Enum):
@@ -33,12 +29,6 @@ class CallbackResult:
         if not self.success:
             message = self.message or "Operation failed"
             raise LifecycleError(f"{operation} failed: {message}" if operation else message)
-
-
-@dataclass(frozen=True)
-class DeactivationResult(Generic[State]):
-    result: CallbackResult = CallbackResult()
-    state: State | None = None
 
 
 @dataclass(frozen=True)

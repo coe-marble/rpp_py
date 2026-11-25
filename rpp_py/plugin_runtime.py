@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
 from rpp_py.capnp_runtime import CapnpRuntime
@@ -7,7 +8,7 @@ import rpp_common
 import capnp
 
 from rpp_py.rpp_runtime_client_context import RppRuntimeClientContext
-from rpp_py.lifecycle import CallbackResult, DeactivationResult, LifecycleError
+from rpp_py.lifecycle import CallbackResult, LifecycleError, LifecycleState
 
 
 class RuntimeConstants:
@@ -86,7 +87,7 @@ class PluginRuntimeServer:
     @staticmethod
     def _dynamic_operations_disabled():
         return CallbackResult.failure(
-            "This hosted slot is lifecycle-only; load, unload, reload, and switch "
+            "This hosted slot is lifecycle-only; load, unload, and reload "
             "are available only for dynamic top-level components")
 
     @staticmethod
@@ -96,16 +97,6 @@ class PluginRuntimeServer:
             return (CallbackResult() if not schema_id else
                     CallbackResult.failure("This adapter does not accept lifecycle state"), None)
         return codec(schema_id, payload)
-
-    @staticmethod
-    def _encode_lifecycle_state(adapter, state, wire):
-        codec = getattr(adapter, "encode_lifecycle_state__", None)
-        if codec is None:
-            if state is not None:
-                return CallbackResult.failure("This adapter does not provide lifecycle state")
-            wire.schemaId = 0
-            return CallbackResult()
-        return codec(state, wire)
 
     def list_components(self):
         components = []
@@ -131,17 +122,6 @@ class PluginRuntimeServer:
             return result
         except Exception as error:
             return CallbackResult.failure(str(error))
-
-    @staticmethod
-    def _invoke_deactivation(callback):
-        try:
-            result = callback()
-            if not isinstance(result, DeactivationResult):
-                return DeactivationResult(CallbackResult.failure(
-                    "Lifecycle deactivation must return DeactivationResult"))
-            return result
-        except Exception as error:
-            return DeactivationResult(CallbackResult.failure(str(error)))
 
     def cleanup_components(self):
         first_error = CallbackResult()
@@ -217,17 +197,68 @@ class PluginRuntimeServer:
             output.success = result.success
             output.message = result.message
 
-        def missing(instance_id):
-            return CallbackResult.failure(f"Unknown hosted component instance: {instance_id}")
+        def resolve_instance(owner, instance_id, seen, expected=None):
+            instance_id = str(instance_id)
+            if not instance_id:
+                raise LifecycleError("Component instance ID is required")
+            if instance_id in seen:
+                raise LifecycleError(f"Repeated component instance: {instance_id}")
+            seen.add(instance_id)
+            entry = owner._entry_for_instance(instance_id)
+            if entry is None:
+                raise LifecycleError(f"Unknown hosted component instance: {instance_id}")
+            if expected is not None:
+                status = entry[1].manager.get_info(entry[2])
+                if status.transition or status.state is not expected:
+                    raise LifecycleError(f"Instance {instance_id!r} must be {expected.value.lower()}")
+            return instance_id, entry[1], entry[2]
 
-        async def configureComponent(self, instanceId, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            result = self.owner._invoke(lambda: entry[1].manager.configure(entry[2])) if entry else missing(instanceId)
+        def apply_instances(instances, operate):
+            for instance_id, slot, name in instances:
+                result = operate(slot, name)
+                if not result.success:
+                    if len(instances) > 1:
+                        return CallbackResult.failure(f"Instance {instance_id!r}: {result.message}")
+                    return result
+            return CallbackResult()
+
+        def operate_on_instances(owner, instance_ids, operate):
+            seen = set()
+            instances = [resolve_instance(owner, key, seen) for key in instance_ids]
+            return apply_instances(instances, operate)
+
+        def prepare_activations(owner, instance_ids, handover_states, seen, expected=None):
+            if handover_states and len(handover_states) != len(instance_ids):
+                raise LifecycleError("Handover states must follow activation IDs, one entry per ID")
+            instances = [resolve_instance(owner, key, seen, expected) for key in instance_ids]
+            activations = []
+            for index, (instance_id, slot, name) in enumerate(instances):
+                handover = None
+                if handover_states:
+                    wire = handover_states[index]
+                    decoded, handover = owner._decode_lifecycle_state(
+                        slot.adapter, wire.schemaId, wire.payload)
+                    decoded.require_success(f"State for {instance_id!r}")
+                activations.append((instance_id, slot, name, deepcopy(handover)))
+            return activations
+
+        def activate_all(activations):
+            for instance_id, slot, name, handover in activations:
+                result = slot.manager.activate(name, handover)
+                if not result.success:
+                    if len(activations) > 1:
+                        return CallbackResult.failure(f"Instance {instance_id!r}: {result.message}")
+                    return result
+            return CallbackResult()
+
+        async def configureComponent(self, instanceIds, _context, **kwargs):
+            result = self.owner._invoke(lambda: operate_on_instances(
+                self.owner, instanceIds, lambda slot, name: slot.manager.configure(name)))
             result_into(_context.results.result, result)
 
-        async def cleanupComponent(self, instanceId, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            result = self.owner._invoke(lambda: entry[1].manager.cleanup(entry[2])) if entry else missing(instanceId)
+        async def cleanupComponent(self, instanceIds, _context, **kwargs):
+            result = self.owner._invoke(lambda: operate_on_instances(
+                self.owner, instanceIds, lambda slot, name: slot.manager.cleanup(name)))
             result_into(_context.results.result, result)
 
         async def listComponents(self, _context, **kwargs):
@@ -242,26 +273,15 @@ class PluginRuntimeServer:
                 item.state = component["state"]
                 item.connectionName = component["connection_name"]
 
-        async def activateComponent(self, instanceId, state, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            result = missing(instanceId)
-            if entry:
-                result, handover = self.owner._decode_lifecycle_state(entry[1].adapter,
-                    state.schemaId, state.payload)
-                if result.success:
-                    result = self.owner._invoke(
-                        lambda: entry[1].manager.activate(entry[2], handover))
+        async def activateComponent(self, instanceIds, handoverStates, _context, **kwargs):
+            result = self.owner._invoke(lambda: activate_all(
+                prepare_activations(self.owner, instanceIds, handoverStates, set())))
             result_into(_context.results.result, result)
 
-        async def deactivateComponent(self, instanceId, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            stopped = (self.owner._invoke_deactivation(lambda: entry[1].manager.deactivate(entry[2]))
-                       if entry else DeactivationResult(missing(instanceId)))
-            result_into(_context.results.result.result, stopped.result)
-            if stopped.result.success:
-                encoded = self.owner._encode_lifecycle_state(entry[1].adapter,
-                    stopped.state, _context.results.result.state)
-                result_into(_context.results.result.result, encoded)
+        async def deactivateComponent(self, instanceIds, _context, **kwargs):
+            result = self.owner._invoke(lambda: operate_on_instances(
+                self.owner, instanceIds, lambda slot, name: slot.manager.deactivate(name)))
+            result_into(_context.results.result, result)
 
         async def loadComponent(self, component, _context, **kwargs):
             connection_name = str(component.connectionName)
@@ -277,54 +297,58 @@ class PluginRuntimeServer:
                         result = self.owner._invoke(slot.refresh_adapter)
             result_into(_context.results.result, result)
 
-        async def unloadComponent(self, instanceId, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            result = missing(instanceId)
-            if entry:
-                if not entry[1].allows_dynamic_operations:
-                    result = self.owner._dynamic_operations_disabled()
-                else:
-                    result = self.owner._invoke(lambda: entry[1].manager.unload(entry[2]))
-                    if result.success and entry[1].manager.selected_context() is not None:
-                        result = self.owner._invoke(entry[1].refresh_adapter)
-            result_into(_context.results.result, result)
-
-        async def reloadComponent(self, instanceId, transferState, _context, **kwargs):
-            entry = self.owner._entry_for_instance(str(instanceId))
-            result = missing(instanceId)
-            if entry:
-                if not entry[1].allows_dynamic_operations:
-                    result = self.owner._dynamic_operations_disabled()
-                else:
-                    result = self.owner._invoke(lambda: entry[1].manager.reload(
-                        entry[2], transfer_state=bool(transferState)))
-                    if result.success:
-                        result = self.owner._invoke(entry[1].refresh_adapter)
-            result_into(_context.results.result, result)
-
-        async def switchComponents(
-                self, connectionName, sourceInstanceId, targetInstanceId, transferState,
-                _context, **kwargs):
-            slot = self.owner._slot(str(connectionName))
-            result = CallbackResult.failure(f"Unknown hosted slot connection: {connectionName}")
-            if slot:
+        async def unloadComponent(self, instanceIds, _context, **kwargs):
+            def unload(slot, name):
                 if not slot.allows_dynamic_operations:
-                    result = self.owner._dynamic_operations_disabled()
-                else:
-                    source = self.owner._entry_for_instance(str(sourceInstanceId))
-                    target = self.owner._entry_for_instance(str(targetInstanceId))
-                    if source is None:
-                        result = missing(sourceInstanceId)
-                    elif target is None:
-                        result = missing(targetInstanceId)
-                    elif source[0] != str(connectionName) or target[0] != str(connectionName):
-                        result = CallbackResult.failure("Switch components must belong to the selected slot")
-                    else:
-                        result = self.owner._invoke(lambda: slot.manager.switch_components(
-                            source[2], target[2], transfer_state=bool(transferState)))
-                        if result.success:
-                            result = self.owner._invoke(slot.refresh_adapter)
+                    return self.owner._dynamic_operations_disabled()
+                result = slot.manager.unload(name)
+                if result.success and slot.manager.selected_context() is not None:
+                    return slot.refresh_adapter()
+                return result
+
+            result = self.owner._invoke(lambda: operate_on_instances(self.owner, instanceIds, unload))
             result_into(_context.results.result, result)
+
+        async def reloadComponent(self, instanceIds, handoverStates, _context, **kwargs):
+            def reload_all():
+                replacements = prepare_activations(self.owner, instanceIds, handoverStates, set())
+                for instance_id, slot, name, state in replacements:
+                    if not slot.allows_dynamic_operations:
+                        return self.owner._dynamic_operations_disabled()
+                    result = slot.manager.reload(name, state)
+                    if not result.success:
+                        return CallbackResult.failure(f"Instance {instance_id!r}: {result.message}")
+                    result = slot.refresh_adapter()
+                    if not result.success:
+                        return result
+                return CallbackResult()
+
+            result_into(_context.results.result, self.owner._invoke(reload_all))
+
+        async def switchComponents(self, deactivate, activate, handoverStates, _context, **kwargs):
+            def switch():
+                seen = set()
+                outgoing = [resolve_instance(self.owner, key, seen, LifecycleState.ACTIVE)
+                            for key in deactivate]
+                incoming = prepare_activations(
+                    self.owner, activate, handoverStates, seen, LifecycleState.INACTIVE)
+                stopped = apply_instances(outgoing, lambda slot, name: slot.manager.deactivate(name))
+                if not stopped.success:
+                    return stopped
+                started = activate_all(incoming)
+                if not started.success:
+                    return started
+                refreshed_slots = set()
+                for _, slot, _, _ in incoming:
+                    if id(slot) in refreshed_slots:
+                        continue
+                    refreshed_slots.add(id(slot))
+                    result = slot.refresh_adapter()
+                    if not result.success:
+                        return result
+                return CallbackResult()
+
+            result_into(_context.results.result, self.owner._invoke(switch))
 
         async def listAdapters(self, _context, **kwargs):
             self.logger.debug("Runtime server received listAdapters.")
@@ -452,39 +476,57 @@ class PluginRuntimeClient:
         return await self.configure_instance(await self._component_id(connection_name))
 
     async def configure_instance(self, instance_id: str) -> CallbackResult:
-        response = await self._client.configureComponent(instanceId=instance_id)
+        return await self.configure_instances([instance_id])
+
+    async def configure_instances(self, instance_ids: list[str]) -> CallbackResult:
+        response = await self._client.configureComponent(instanceIds=list(instance_ids))
         return CallbackResult(response.result.success, str(response.result.message))
 
     async def cleanup_component(self, connection_name: str) -> CallbackResult:
         return await self.cleanup_instance(await self._component_id(connection_name))
 
     async def cleanup_instance(self, instance_id: str) -> CallbackResult:
-        response = await self._client.cleanupComponent(instanceId=instance_id)
+        return await self.cleanup_instances([instance_id])
+
+    async def cleanup_instances(self, instance_ids: list[str]) -> CallbackResult:
+        response = await self._client.cleanupComponent(instanceIds=list(instance_ids))
         return CallbackResult(response.result.success, str(response.result.message))
 
     async def activate_component(self, connection_name: str, state=None, *, adapter) -> CallbackResult:
         return await self.activate_instance(await self._component_id(connection_name), state, adapter=adapter)
 
     async def activate_instance(self, instance_id: str, state=None, *, adapter) -> CallbackResult:
-        request = self._client.activateComponent_request(
-            instanceId=instance_id)
-        encoded = adapter.encode_lifecycle_state__(state, request.state)
+        request = self._client.activateComponent_request()
+        request.instanceIds = [instance_id]
+        wire = request.init("handoverStates", 1)[0]
+        encoded = adapter.encode_lifecycle_state__(state, wire)
         if not encoded.success:
             return encoded
         response = await request.send()
         return CallbackResult(response.result.success, str(response.result.message))
 
-    async def deactivate_component(self, connection_name: str, *, adapter) -> DeactivationResult:
-        return await self.deactivate_instance(await self._component_id(connection_name), adapter=adapter)
+    async def activate_instances(self, instance_ids: list[str], handover_states=None) -> CallbackResult:
+        """Forward encoded state envelopes in instance-ID order."""
+        response = await self._client.activateComponent(
+            instanceIds=list(instance_ids), handoverStates=handover_states or [])
+        return CallbackResult(response.result.success, str(response.result.message))
 
-    async def deactivate_instance(self, instance_id: str, *, adapter) -> DeactivationResult:
-        response = await self._client.deactivateComponent(instanceId=instance_id)
-        result = CallbackResult(response.result.result.success, str(response.result.result.message))
-        if not result.success:
-            return DeactivationResult(result)
-        decoded, state = adapter.decode_lifecycle_state__(
-            response.result.state.schemaId, response.result.state.payload)
-        return DeactivationResult(decoded, state)
+    async def switch_components(self, deactivate: list[str], activate: list[str],
+                                handover_states=None) -> CallbackResult:
+        """Forward encoded state envelopes in activation-ID order."""
+        response = await self._client.switchComponents(
+            deactivate=deactivate, activate=activate, handoverStates=handover_states or [])
+        return CallbackResult(response.result.success, str(response.result.message))
+
+    async def deactivate_component(self, connection_name: str) -> CallbackResult:
+        return await self.deactivate_instance(await self._component_id(connection_name))
+
+    async def deactivate_instance(self, instance_id: str) -> CallbackResult:
+        return await self.deactivate_instances([instance_id])
+
+    async def deactivate_instances(self, instance_ids: list[str]) -> CallbackResult:
+        response = await self._client.deactivateComponent(instanceIds=list(instance_ids))
+        return CallbackResult(response.result.success, str(response.result.message))
 
     async def load_component(self, component_path: str, plugin_name: str,
                              connection_name: str) -> CallbackResult:
@@ -502,24 +544,25 @@ class PluginRuntimeClient:
         return result
 
     async def unload_instance(self, instance_id: str) -> CallbackResult:
-        response = await self._client.unloadComponent(instanceId=instance_id)
+        return await self.unload_instances([instance_id])
+
+    async def unload_instances(self, instance_ids: list[str]) -> CallbackResult:
+        # A failed batch may already have unloaded earlier entries.
+        self._component_ids_by_connection.clear()
+        response = await self._client.unloadComponent(instanceIds=list(instance_ids))
         return CallbackResult(response.result.success, str(response.result.message))
 
-    async def reload_component(self, connection_name: str, *, transfer_state=False) -> CallbackResult:
+    async def reload_component(self, connection_name: str, handover_states=None) -> CallbackResult:
         result = await self.reload_instance(
-            await self._component_id(connection_name), transfer_state=transfer_state)
+            await self._component_id(connection_name), handover_states)
         self._component_ids_by_connection.pop(connection_name, None)
         return result
 
-    async def reload_instance(self, instance_id: str, *, transfer_state=False) -> CallbackResult:
-        response = await self._client.reloadComponent(
-            instanceId=instance_id, transferState=transfer_state)
-        return CallbackResult(response.result.success, str(response.result.message))
+    async def reload_instance(self, instance_id: str, handover_states=None) -> CallbackResult:
+        return await self.reload_instances([instance_id], handover_states)
 
-    async def switch_components(self, connection_name: str, source_instance_id: str,
-                                target_instance_id: str, *, transfer_state=True) -> CallbackResult:
-        response = await self._client.switchComponents(
-            connectionName=connection_name, sourceInstanceId=source_instance_id,
-            targetInstanceId=target_instance_id, transferState=transfer_state)
-        self._component_ids_by_connection.pop(connection_name, None)
+    async def reload_instances(self, instance_ids: list[str], handover_states=None) -> CallbackResult:
+        self._component_ids_by_connection.clear()
+        response = await self._client.reloadComponent(
+            instanceIds=list(instance_ids), handoverStates=handover_states or [])
         return CallbackResult(response.result.success, str(response.result.message))

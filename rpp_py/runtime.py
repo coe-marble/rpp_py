@@ -90,14 +90,10 @@ class _Runtime:
     def unload_component(self, slot_name, name, *, timeout=None):
         return self._context._slot(slot_name).unload(name, timeout=timeout)
 
-    def switch_component(self, slot_name, source, target, *, transfer_state=True, timeout=None):
-        return self._context._slot(slot_name).switch_components(
-            source, target, transfer_state=transfer_state, timeout=timeout)
-
-    def reload_component(self, slot_name, name, *, transfer_state=False, timeout=None,
+    def reload_component(self, slot_name, name, state=None, *, timeout=None,
                          refresh: Callable | None = None):
         return self._context._slot(slot_name).reload(
-            name, transfer_state=transfer_state, timeout=timeout, refresh=refresh)
+            name, state, timeout=timeout, refresh=refresh)
 
     def set_registration_validator(self, slot_name, validator):
         return self._context._slot(slot_name).set_registration_validator(validator)

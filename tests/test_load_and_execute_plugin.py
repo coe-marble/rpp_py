@@ -153,7 +153,7 @@ class TestLoadAndExecutePluginNative(BaseTestLoadAndExecutePlugin):
             # the parent rejects while its native child accepts the same request.
             assert not runtime.get_instance().validate(message)
             assert context.get_subcomponent_instance("ctl_main").validate(message)
-            assert controller.deactivate().result.success
+            assert controller.deactivate().success
             assert controller.activate().success
 
             assert not runtime.get_instance().validate(message)
@@ -641,10 +641,10 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
             assert executor.call(runtime_client.activate_instance(first_id, adapter=adapter)).success
             message = self._odometry_message(adapter, 6.0)
             assert adapter.validate(message)
-            stopped = executor.call(runtime_client.deactivate_instance(first_id, adapter=adapter))
-            assert stopped.result.success
+            stopped = executor.call(runtime_client.deactivate_instance(first_id))
+            assert stopped.success
             assert executor.call(runtime_client.activate_instance(
-                first_id, stopped.state, adapter=adapter)).success
+                first_id, adapter=adapter)).success
 
             assert executor.call(runtime_client.load_component(
                 str(second.folder), plugin_name, connection_name)).success
@@ -652,15 +652,15 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
             second_id = next(str(status.instanceId) for status in statuses
                              if str(status.name) == "remote_second")
             assert executor.call(runtime_client.configure_instance(second_id)).success
-            assert executor.call(runtime_client.switch_components(
-                connection_name, first_id, second_id, transfer_state=True)).success
+            assert executor.call(runtime_client.deactivate_instance(first_id)).success
+            assert executor.call(runtime_client.activate_instance(second_id, adapter=adapter)).success
 
             adapter.disconnect_adapter_client__()
             adapter = connect_adapter()
             assert adapter.validate(message)
             assert executor.call(runtime_client.unload_instance(first_id)).success
-            assert executor.call(runtime_client.reload_instance(
-                second_id, transfer_state=True)).success
+            assert executor.call(runtime_client.deactivate_instance(second_id)).success
+            assert executor.call(runtime_client.reload_instance(second_id)).success
             statuses = executor.call(runtime_client.list_components(connection_name))
             reloaded_id = next(str(status.instanceId) for status in statuses
                                if str(status.name) == "remote_second")
@@ -668,9 +668,9 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
 
             adapter.disconnect_adapter_client__()
             adapter = connect_adapter()
+            assert executor.call(runtime_client.activate_instance(reloaded_id, adapter=adapter)).success
             assert adapter.validate(message)
-            assert executor.call(runtime_client.deactivate_instance(
-                reloaded_id, adapter=adapter)).result.success
+            assert executor.call(runtime_client.deactivate_instance(reloaded_id)).success
             assert executor.call(runtime_client.cleanup_instance(reloaded_id)).success
             executor.call(runtime_client.shutdown())
         finally:
@@ -714,8 +714,8 @@ class TestLoadAndExecutePluginAdapter(BaseTestLoadAndExecutePlugin):
             message.pose.position.x = 11.0
             assert python_component.validate(message)
             stopped = remote_child.deactivate()
-            assert stopped.result.success
-            assert remote_child.activate(stopped.state).success
+            assert stopped.success
+            assert remote_child.activate().success
             message.pose.position.x = 6.0
             assert not python_component.validate(message)
             message.pose.position.x = 11.0

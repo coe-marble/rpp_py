@@ -34,6 +34,34 @@ def no_axis_overlap(candidate, registered):
             if overlap else CallbackResult())
 
 
+def test_guarded_callback_returns_success_and_value_without_raising():
+    runtime, context = root("Option[controllers::Controller]", [child("first")])
+    calls = []
+
+    def callback(_):
+        calls.append(1)
+        return 7
+
+    assert context.with_active_component("missing", "first", callback) == (False, None)
+    assert context.with_active_component("controllers", "first", callback) == (False, None)
+    runtime.configure().require_success()
+    context.activate_subcomponents().require_success()
+    assert context.with_active_component("controllers", "missing", callback) == (False, None)
+    assert context.with_active_component("controllers", "first", callback,
+                                        expected_instance_id="stale") == (False, None)
+    assert calls == []
+    assert context.with_active_component("controllers", "", callback) == (True, 7)
+    assert calls == [1]
+
+    def fail(_):
+        raise ValueError("Callback failed")
+
+    assert context.with_active_component("controllers", "first", fail) == (False, None)
+    assert runtime.close().success
+    assert context.with_active_component("controllers", "first", callback) == (False, None)
+    assert calls == [1]
+
+
 def test_static_slot_lifecycle_uses_runtime_and_context_views():
     runtime, context = root("Option[controllers::Controller]", [child("first"), child("second")])
     runtime.configure().require_success()
@@ -47,11 +75,10 @@ def test_static_slot_lifecycle_uses_runtime_and_context_views():
         LifecycleState.ACTIVE, LifecycleState.INACTIVE]
     assert not runtime.load_component("controllers", "third", "/third").success
     assert not runtime.unload_component("controllers", "first").success
-    assert not runtime.switch_component("controllers", "first", "second").success
 
 
 @pytest.mark.parametrize("declaration", ["controllers::Controller", "Option[controllers::Controller]"])
-def test_dynamic_slot_loads_and_switches_through_runtime(declaration):
+def test_dynamic_slot_loads_and_activates_through_runtime(declaration):
     runtime, context = root(
         declaration, [child("first")], dynamic=True, factory=lambda _: child("second"))
     runtime.configure().require_success()
@@ -61,7 +88,8 @@ def test_dynamic_slot_loads_and_switches_through_runtime(declaration):
     assert runtime.configure_component("controllers", "second").success
     with context.active_component("controllers") as active:
         assert active is context.get_subcomponent_instance("controllers")
-    assert runtime.switch_component("controllers", "first", "second").success
+    assert runtime.deactivate_component("controllers", "first").success
+    assert runtime.activate_component("controllers", "second").success
 
     selected = context.get_subcomponent_context("controllers")
     assert selected.get_instance() is context.get_subcomponent_instance("controllers")
